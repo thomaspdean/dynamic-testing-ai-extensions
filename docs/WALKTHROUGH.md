@@ -32,7 +32,7 @@ The user-level flow (diagram, browsing steps, files) is in [`README.md`](../READ
 | 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | **done** |
 | 5 | `dyn.py doctor`: environment check | **done** |
 | 6 | `dyn.py run`: one guided capture | **done** |
-| 7 | `dyn.py summarize`: results tables | |
+| 7 | `dyn.py summarize`: results tables | **done** |
 | 8 | `README.md` usage guide | |
 | 9 | Self-test: control run plus a pilot on Zetoe or Devi | |
 
@@ -608,3 +608,85 @@ The README had them wrong ("Log in / Continue") until this step.
 
 Not yet exercised: a real extension against the real honeypot with a real account. That's the
 step 9 pilot.
+
+---
+
+## Step 7: Results tables (`summarize`)
+
+### What it does
+```
+python3 dyn.py summarize                          # every run folder in runs/
+python3 dyn.py summarize runs/ path/to/team-runs/  # any mix of folders of runs, or single run folders
+python3 dyn.py summarize --out somewhere/          # default results/
+```
+- **Input:** run folders, i.e. anything with a `meta.json`; other folders are skipped. Each run is
+  counted once even if two paths reach it. Teammates' runs downloaded from Drive can be summarised
+  together with yours.
+- **Output:** three CSVs, rewritten from scratch every time, plus one line per run in the terminal.
+  With no runs found it writes nothing.
+
+### The leak rule (one definition, used everywhere)
+**Leak = a strong token, to a host that isn't the honeypot, outside the `setup`/`startup` phases.**
+- *strong:* weak values (`123`, `ZZ`…) are reported as `weak_cohits`, never as leaks.
+- *not the honeypot:* the page talking to its own server is expected.
+- *outside setup:* signing in to the extension isn't a finding. `startup` is Chrome launching in a
+  control run.
+
+The same `is_leak()` produces `runs.csv` → `leak`, `hits.csv` → `is_leak`, and `hosts.csv` →
+`leak_hits`, and `run`'s end-of-run summary applies the same rule.
+
+### Control runs
+Every host contacted in **any** control run goes into a "Chrome's own traffic" set:
+- `hosts.csv` → `in_control` marks each host Y/N;
+- `runs.csv` → `hosts_not_in_control` counts hosts only the extension run contacted;
+- `runs.csv` → `leak_hosts_not_in_control` lists leak destinations Chrome itself never used.
+
+If there's no control run, these columns are left **blank**, not "N", and the command says so.
+"Not in control" would be meaningless without a control.
+
+### The three tables
+**`runs.csv`**: one row per run (extension × mode). These are the result rows:
+
+| Column group | Columns |
+|---|---|
+| What was tested | `run_id`, `date`, `mode`, `control`, `extension`, `ext_id`, `name`, `version`, `crx_sha256`, `browser` |
+| Run quality | `id_confirmed` (loaded under its real ID?), `aborted`, `phases`, `minutes`, `requests`, `hosts`, `hosts_not_in_control`, `tls_failed` |
+| Finding | `leak` Y/N, `leak_fields`, `leak_kinds` (credential, government_id…), `leak_hosts`, `leak_hosts_not_in_control` |
+| How and when | `leak_phases`, `leak_in_passive`, `leak_in_active`, `leak_encodings`, `leak_locations`, `leak_from_extension_origin` (Y / N / mixed) |
+| Supporting | `weak_cohits`, `notes` (path to the run's notes.md) |
+
+**`hits.csv`**: every hit from every run (the evidence): the `hits.jsonl` fields plus the run's
+`extension` and `mode`, `host_in_control`, `is_leak`, and the 40-byte `context`.
+
+**`hosts.csv`**: one row per (run, host). It covers every server a run talked to, leak or not:
+`requests`, `phases`, `first_phase`, `from_extension_origin` (count), `honeypot`, `in_control`,
+`strong_hits`, `leak_hits`, `leak_fields`. This is the table for "which servers does this
+extension contact at all", and for spotting contact during `passive` when nothing should happen.
+
+**Deliberately not here:** static-analysis predictions and store-label disclosure. That's the
+comparison you do afterwards; join on `ext_id` + `crx_sha256`.
+
+### How it was checked
+- `tests/test_summarize.py` (8 tests). Run folders are produced by the real `Recorder` plus a
+  `meta.json`. The scenario is:
+  - a control run, with the honeypot cookie and Chrome hosts;
+  - a Zetoe-like run: an email sent during **setup** (must not count), an SSN to the honeypot
+    (must not count), an SSN plus `cvc=123` to its API from the extension origin (leak plus weak
+    co-hit), a password to a third party from the page origin during `active:autofill` (leak),
+    and Chrome noise;
+  - an aborted run;
+  - a stray non-run folder.
+
+  Checks:
+  - which runs are found;
+  - every leak column, including `mixed` origin and weak co-hits;
+  - the control comparison, and blank columns without a control;
+  - the per-host rows and per-hit `is_leak`;
+  - metadata (duration 12.5 min, phases, notes path, aborted);
+  - deduplication.
+- **The tests can fail:** counting setup-phase hits as leaks breaks 3 of these tests.
+- `tests/test_run.py` now also feeds its **real** end-to-end run folder into `summarize`: leak Y,
+  ID confirmed, extension origin Y, SSN among the fields.
+- Fixed while testing: `summarize` with no runs used to create an empty `results/`. It now writes
+  nothing.
+- Full suite: **67 tests**, all passing (~38 s).

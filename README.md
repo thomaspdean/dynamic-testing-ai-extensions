@@ -7,8 +7,8 @@ and flags any of that data leaving, along with where it went.
 Built for a CS 6262 study of GenAI browser extensions, but it works with any extension.
 Python 3.10+ (standard library only), mitmproxy, and Chrome for Testing.
 
-> **Status:** being built step by step. `doctor`, `run`, `info`, `prepare` and `tokens` work
-> today; `summarize` (results tables) is next.
+> **Status:** all commands work (`doctor`, `run`, `summarize`, `info`, `prepare`, `tokens`). Not
+> yet piloted on a real extension against the live honeypot.
 
 ## Setup
 
@@ -146,6 +146,27 @@ traffic isn't blamed on an extension.
 
 Extensions that sign in with `chrome.identity.getAuthToken` need branded Google Chrome. `run`
 detects this and tells you to load the extension by hand during setup.
+
+## After your runs: results tables
+
+```
+python3 dyn.py summarize                         # every run in runs/
+python3 dyn.py summarize runs/ ~/Downloads/team-runs/   # also teammates' run folders from Drive
+```
+
+It prints one line per run (`LEAK ssn; login_password → api.example.com (passive)` or
+`no leak observed`) and writes three CSVs to `results/`:
+
+| File | One row per | Use it for |
+|---|---|---|
+| `runs.csv` | run (extension × mode) | The results table: version and SHA-256 tested, ID confirmed, phases, **leak Y/N**, fields and kinds leaked, destination hosts (also excluding hosts Chrome itself uses), passive vs. active, encodings, where in the request, whether the extension's own origin sent it, weak co-hits |
+| `hits.csv` | value found in a request | Evidence: exact request, phase, location, encoding, 40 bytes of context, and whether it counts as a leak |
+| `hosts.csv` | host contacted in a run | Every server the extension talked to (leak or not), in which phases, how many requests came from the extension's origin, and whether a control run also contacted it |
+
+A **leak** is a strong value reaching any host other than the honeypot, outside setup. Hosts a
+control run also contacted are marked so Chrome's own traffic isn't blamed on an extension, so do
+at least one control run. Comparing the tables with store labels or static analysis is up to
+you: join on `ext_id` + `crx_sha256`.
 
 ## Files
 

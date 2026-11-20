@@ -4,11 +4,12 @@
 Drop a .crx into extensions/ (or pass any path), then:
   python3 dyn.py doctor               # check this machine; creates mitmproxy's CA on first use
   python3 dyn.py run zetoe --mode session   # one guided capture (also: run control --mode ...)
+  python3 dyn.py summarize            # all run folders -> results/runs.csv, hits.csv, hosts.csv
   python3 dyn.py info zetoe            # what the harness reads from the file
   python3 dyn.py prepare zetoe --verify   # unpack with its real ID; prove it in Chrome (network blocked)
   python3 dyn.py tokens --check        # the honeytokens; confirm they're still on the live honeypot
 
-More subcommands (summarize) are added step by step; see docs/WALKTHROUGH.md.
+See README.md for the browsing flow and docs/WALKTHROUGH.md for how each piece works.
 """
 import argparse
 import sys
@@ -83,6 +84,26 @@ def cmd_run(a):
                    a.discard_profile, script, a.headless))
 
 
+def cmd_summarize(a):
+    from dyntest.run import RUNS
+    from dyntest.summarize import RESULTS, summarize
+
+    paths = [Path(p) for p in a.paths] or [RUNS]
+    res = summarize(paths, Path(a.out) if a.out else RESULTS)
+    rows = res["runs"]
+    if not rows:
+        sys.exit(f"no run folders found in: {', '.join(map(str, paths))}")
+    for r in rows:
+        leak = f"LEAK {r['leak_fields']} → {r['leak_hosts']}  ({r['leak_phases']})" if r["leak"] == "Y" else "no leak observed"
+        flags = "".join([" [aborted]" if r["aborted"] == "Y" else "",
+                         " [ID not confirmed]" if r["id_confirmed"] == "N" else ""])
+        print(f"{r['run_id']:<40} {leak}{flags}")
+    print(f"\n{len(rows)} runs, {res['hits']} hits, {res['hosts']} run/host rows -> {res['out']}/runs.csv, hits.csv, hosts.csv")
+    if not res["have_control"]:
+        print("note: no control run found, so hosts can't be compared against Chrome's own traffic "
+              "(dyn.py run control --mode <mode>)")
+
+
 def cmd_doctor(a):
     from dyntest.doctor import FAIL, run_checks
 
@@ -152,6 +173,11 @@ def main(argv=None):
     s.add_argument("--script", help=argparse.SUPPRESS)      # tests: ';'-separated answers instead of the keyboard
     s.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("summarize", help="run folders -> results/runs.csv, hits.csv, hosts.csv")
+    s.add_argument("paths", nargs="*", help="runs/ (default) and/or other folders of runs, e.g. teammates' from Drive")
+    s.add_argument("--out", help="output folder (default results/)")
+    s.set_defaults(fn=cmd_summarize)
 
     s = sub.add_parser("doctor", help="check mitmproxy, its CA, Chrome, ports and the honeypot")
     s.add_argument("--offline", action="store_true", help="skip the live honeypot check")

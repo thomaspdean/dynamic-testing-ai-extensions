@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (shared helpers)
 from dyntest import browser, mitm, prepare as prep, run as runmod  # noqa: E402
 from dyntest.crx import id_from_public_key  # noqa: E402
+from dyntest.summarize import summarize  # noqa: E402
 from test_crx import _zip, make_crx3  # noqa: E402
 
 OPENSSL = shutil.which("openssl")
@@ -88,6 +89,10 @@ class TestRun(unittest.TestCase):
         phases = [json.loads(l)["phase"] for l in (d / "phases.jsonl").read_text().splitlines()]
         self.assertEqual(phases, meta["phases"])
         self.assertTrue((d / "notes.md").exists() and (d / "profile").is_dir())
+        # the real run folder feeds summarize directly
+        (row,) = summarize([d], self.tmp / "results")["runs"]
+        self.assertEqual((row["leak"], row["id_confirmed"], row["leak_from_extension_origin"]), ("Y", "Y", "Y"))
+        self.assertIn("ssn", row["leak_fields"])
 
     def test_ctrl_c_still_saves_a_closed_out_run(self):
         d, meta, _ = self.go("control", ["\x04"], discard_profile=True)    # EOF/Ctrl-C at the notes prompt
