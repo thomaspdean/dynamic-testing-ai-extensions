@@ -20,7 +20,7 @@ picks, and no dependency on the static-analysis repo. Comparing results with sta
 or store labels is analysis you do afterwards. Every run records the extension's ID, version and
 file SHA-256, so that comparison is easy to join.
 
-The flow diagram is in [`README.md`](../README.md#how-it-works).
+The user-level flow (diagram, browsing steps, files) is in [`README.md`](../README.md#how-it-works); this file covers how each piece works inside.
 
 ## Build order
 
@@ -29,7 +29,7 @@ The flow diagram is in [`README.md`](../README.md#how-it-works).
 | 1 | Read an extension from its `.crx` (parser + `dyn.py info`) | **done** |
 | 2 | Unpack with the manifest `key` so it keeps its real ID (automatic in `run`; `dyn.py prepare` to check it alone) | **done** |
 | 3 | `data/tokens.json`: the values the detector looks for | **done** |
-| 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | |
+| 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | **done** |
 | 5 | `dyn.py doctor`: environment check | |
 | 6 | `dyn.py run`: one guided capture | |
 | 7 | `dyn.py summarize`: results tables | |
@@ -286,3 +286,118 @@ pages, values. The loader validates it:
   - validation catches a too-short strong value, a case-insensitive duplicate, and missing honeypot hosts;
   - `--check` reports a value that's missing from the pages (with a fake fetch, no network).
 - Full suite: 26 tests, all passing.
+
+---
+
+## Step 4: The detector
+
+### What it does
+While a run is capturing, mitmproxy hands every request the browser makes to the detector. The
+detector searches that request for the honeytokens and writes what it found. It sees requests from
+the page and from the extension alike: the browser can't send anything that doesn't pass through it.
+
+**Input:** each HTTP request and each WebSocket message the browser sends, plus
+`data/tokens.json` and the run's `phase` file.
+
+**Output**, in the run folder:
+
+| File | One line per | Holds |
+|---|---|---|
+| `requests.jsonl` | every request and WebSocket message, hit or not, plus every connection that couldn't be decrypted (`tls_failed`) | time, phase, method, host, URL, `Origin`, whether the origin is a `chrome-extension://` page, `Sec-Fetch-Site/Dest`, content type, size, whether it went to the honeypot, number of (strong) hits |
+| `hits.jsonl` | each (request, token, encoding, location) match | the above plus `field` (e.g. `name,cc_name`), `value_kind`, `strength`, `matched` (value or digits-only alt), `encoding`, `location`, `count`, and `context`: 40 bytes either side, as evidence |
+
+`requests.jsonl` matters even when nothing leaks. It's the full list of hosts the extension
+contacted, which `summarize` compares against the control run (step 7).
+
+### Three layers
+| File | Role | Why separate |
+|---|---|---|
+| `dyntest/matcher.py` | Turns tokens into encoded forms; searches bytes; inflates embedded compressed streams | Pure standard library, unit tested in plain Python |
+| `dyntest/recorder.py` | Per request: splits it into parts, runs the matcher on each, tags phase / honeypot / extension origin, writes JSONL | Same: testable without mitmproxy |
+| `dyntest/detect_tokens.py` | The mitmproxy addon: converts mitmproxy's request objects into plain values for the recorder | mitmproxy runs addons in its **own bundled Python** (3.15 in the cask app), which can't import anything installed in yours. The addon puts the repo root on its import path and stays as thin as possible |
+
+### Where in a request it looks (`location`)
+- `url`: the whole URL, including the host, so data packed into a subdomain is caught too.
+- `header:<name>`: every header separately, e.g. `header:cookie`, `header:referer`, custom ones.
+- `body`: after mitmproxy undoes `Content-Encoding` (gzip, br, deflate, zstd).
+- `ws-message`: WebSocket messages sent by the browser.
+- `…>zlib@<offset>`, `…>gzip@<offset>`, `…>base64>gzip@<offset>`: a compressed stream found
+  *inside* one of the above and inflated, e.g. a session-replay upload. The offset says where.
+
+### Which encodings (`encoding`)
+Every token value and alt becomes a set of "needles", the exact bytes searched for:
+
+| Encoding | Example (SSN `900-12-3456` or name `Mira Holloway`) | Where you'd see it |
+|---|---|---|
+| `raw` (`raw+case` if the case differs) | `900-12-3456` | JSON bodies, plain text |
+| `url` | `Mira%20Holloway`, `Mira+Holloway`, JS `encodeURIComponent` | query strings, form posts, the honeypot's own cookies |
+| `url-double` | `Mira%2520Holloway` | a URL inside another URL's parameter |
+| `json` / `json-unicode` | `\u002d` escapes | some serializers |
+| `hex` | `3930302d31322d33343536` (either case) | URL hashing/obfuscation (GoGPT hex-encodes URLs) |
+| `base64@k` / `base64url@k`, k = 0, 1, 2 | the stretch of base64 that depends only on the token, for each of the 3 byte offsets it could start at | the token *inside* a larger base64 blob, e.g. a whole JSON payload base64'd into a query parameter |
+| `digits+…` | `900123456`, `2025550147` | values with formatting stripped |
+
+**Weak tokens** (`123`, `ZZ`, `00000`…) only get raw/url/json needles, and must sit between
+non-alphanumeric characters. Otherwise `123` would match inside every number.
+
+**Not detected**, a stated limitation:
+- hashed values (e.g. `sha256(email)`, which trackers send);
+- encryption or custom obfuscation;
+- raw deflate without a zlib/gzip header.
+
+### Precision rules
+- **Overlap:** when a match lies inside a longer match, only the longer one is kept, so an email
+  hit is not also reported as a username hit. The username is still reported where it appears on
+  its own.
+- **Counting:** one `hits.jsonl` line per (token, matched value, encoding) per request part, with
+  `count` for repeats. A page-dump body containing the SSN 40,000 times is one line.
+
+### Attribution fields
+- `is_extension_origin`: the request's `Origin` or `Referer` is `chrome-extension://…`. That's
+  true for the extension's background/service-worker requests and its own pages. Content scripts
+  send requests as the page, so they show the page's origin. Those are told apart by the control
+  run and by the extension's DevTools (CONTEXT §D).
+- `to_honeypot`: the host is in `tokens.json` → `honeypot.hosts`. The page sending its own data
+  to its own server is expected, so `summarize` only calls a hit a leak when this is false.
+- `phase`: read from `<run_dir>/phase`, which `run` writes as the tester moves on. The file is
+  re-read only when it changes.
+
+### What was fixed along the way
+- **Speed:** the first version used one big regex alternation and took **5 s** per 2 MB body,
+  which would stall large requests in the proxy. It now uses `bytes.find` per needle: **0.07 s**
+  per 2 MB.
+- **A quadratic overlap check:** a body containing a token 160,000 times hung the first rewrite.
+  The overlap rule is now a single sorted sweep: 0.19 s for that body.
+- **A test that tested itself:** the `encodeURIComponent` test built its expected strings with
+  the function under test, so breaking the function went unnoticed. It now uses hard-coded
+  JavaScript outputs. A deliberate break of the base64 alignment logic was confirmed to fail its
+  test.
+
+### How it was checked
+- `tests/test_matcher.py` (14 tests):
+  - every strong token, in every encoding above, inside realistic surroundings;
+  - base64 at all 3 offsets × standard/URL-safe;
+  - the digit-only alts;
+  - the honeypot's own cookie format, and a full URL-mode query string;
+  - zlib in a binary body, gzip in a multipart body, base64-wrapped gzip in JSON;
+  - weak-value boundaries, and no base64/hex needles for weak values;
+  - overlap and counting;
+  - **no strong false positives** on 300 KB of random bytes, its base64, hex and zlib forms,
+    and look-alike text ("holloway caves").
+- `tests/test_recorder.py` (5 tests):
+  - phase tagging follows the phase file;
+  - honeypot vs. other host, and extension origin, on the honeypot-cookie and Zetoe-style POST cases;
+  - every request is logged even with no hits;
+  - WebSocket messages and TLS failures are recorded;
+  - request ids continue after a restart.
+- `tests/test_detector_integration.py` (6 tests): **real `mitmdump`** with the addon, real HTTP
+  requests through it, and a local `http.server` as the destination. It uses a throwaway
+  mitmproxy config dir and plain HTTP, so there are no certificates, nothing in `~/.mitmproxy`,
+  and no network. Checks:
+  - every request is recorded with the right phase;
+  - a password in a form post is tagged `setup`;
+  - a base64 SSN in a query string from a `chrome-extension://` origin is caught and attributed;
+  - a `Content-Encoding: gzip` body is decoded and the email found, without a duplicate username hit;
+  - the honeypot cookie is flagged `to_honeypot`;
+  - `flows.mitm` is written.
+- Full suite: **51 tests** pass (~14 s).
