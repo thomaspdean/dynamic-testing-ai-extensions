@@ -20,30 +20,7 @@ picks, and no dependency on the static-analysis repo. Comparing results with sta
 or store labels is analysis you do afterwards. Every run records the extension's ID, version and
 file SHA-256, so that comparison is easy to join.
 
-## The flow
-
-```mermaid
-flowchart TD
-    CRX["extensions/NAME.crx<br/>(any extension; for CS6262 the 15 scanned packages from Drive)"]
-    H["honeypot site: Pollen Bank<br/>quillbert.github.io/honey/<br/>fake SSN, password, API keys…"]
-
-    CRX -->|"1 · read the file<br/>ID, name, version, SHA-256,<br/>needs branded Chrome?"| INFO["dyn.py info NAME"]
-    CRX -->|"2 · unpack with manifest key,<br/>re-check ID (automatic inside run)"| BUILD["build/extensions/ID/<br/>loads with its real store ID"]
-    H -->|"3 · values copied by hand"| TOK["data/tokens.json<br/>strong vs. weak tokens,<br/>digit-only variants"]
-    TOK -->|"4 · matcher + mitm addon"| DET["dyntest/detect_tokens.py<br/>raw · url · json · hex · base64<br/>· inflated zlib/gzip"]
-    DOC["5 · dyn.py doctor<br/>mitm CA + SPKI hash,<br/>Chrome paths, port 8080"]
-
-    BUILD --> RUN
-    DET --> RUN
-    DOC --> RUN
-    RUN["6 · dyn.py run NAME --mode session|url|cookies<br/>fresh Chrome profile + 1 extension → mitmweb + detector<br/>phases: setup → baseline → passive → active → notes"]
-    H -. "you browse it" .-> RUN
-    RUN --> OUT["runs/DATETIME_NAME_MODE/<br/>meta.json · phases.jsonl · hits.jsonl<br/>requests.jsonl · flows.mitm · flows.har · notes.md"]
-    CTRL["dyn.py run control<br/>(same script, no extension)"] --> OUT
-    OUT -->|"7 · dyn.py summarize<br/>leak = strong token → non-honeypot host,<br/>outside setup"| RES["results/runs.csv · hits.csv · hosts.csv"]
-    OUT -. "share" .-> DRIVE["private storage<br/>(never git)"]
-    RES -. "outside the harness" .-> REP["your analysis: compare with<br/>static results, store labels"]
-```
+The flow diagram is in [`README.md`](../README.md#how-it-works).
 
 ## Build order
 
@@ -51,7 +28,7 @@ flowchart TD
 |---|---|---|
 | 1 | Read an extension from its `.crx` (parser + `dyn.py info`) | **done** |
 | 2 | Unpack with the manifest `key` so it keeps its real ID (automatic in `run`; `dyn.py prepare` to check it alone) | **done** |
-| 3 | `data/tokens.json`: the values the detector looks for | |
+| 3 | `data/tokens.json`: the values the detector looks for | **done** |
 | 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | |
 | 5 | `dyn.py doctor`: environment check | |
 | 6 | `dyn.py run`: one guided capture | |
@@ -220,3 +197,92 @@ the real Keychain is never touched. If the popup appears anyway, click **Deny**.
     always passes.
   - The Chrome tests are skipped automatically if Chrome for Testing or a `.crx` isn't available.
 - Full suite: `python3 -m unittest discover tests` gives 20 tests, all passing (~13 s).
+
+---
+
+## Step 3: The honeytokens (`data/tokens.json`)
+
+### What it is
+The list of fake sensitive values the honeypot puts on its pages. The detector (step 4) searches
+every captured request for exactly these. This is the harness's definition of "user data", so a
+value missing from this file can never be reported as a leak.
+
+```
+python3 dyn.py tokens            # list them
+python3 dyn.py tokens --check    # also fetch the live honeypot and confirm every value is still there
+```
+
+### Where the values come from
+The honeypot's own source, not memory or a copy in a document:
+- `assets/app.js` (the `defaults` and `loginDefaults` objects);
+- the `value="…"` attributes in its HTML forms, which is where URL mode gets its values;
+- the honeypot repo ([Quillbert/honey](https://github.com/Quillbert/honey)) has one commit, 21ebc36
+  from 2026-11-11. The file records it.
+
+Session, URL and cookie mode all use the **same** values, so the mode a value leaked from comes
+from the run's mode, not from the value. Each run uses one mode and a fresh profile.
+
+`--check` downloads the honeypot pages listed in the file and fails if any value is missing.
+Run it if the honeypot might have changed. A silently changed honeypot would make every run
+report "no leak". It currently passes: all 19 values were found on the 6 pages.
+
+### What's in the file
+
+| Part | Purpose |
+|---|---|
+| `honeypot.hosts` | `quillbert.github.io`. Requests *to the honeypot itself* are expected (the page loading its own data), so a leak means a value reaching **any other host** |
+| `honeypot.pages` | What `--check` fetches |
+| `tokens[]` | One entry per distinct value. Each has `value`, the honeypot `fields` that use it, a `kind`, a `strength`, and optional `alts` |
+
+**One entry per value, not per field.** 22 field names but 19 distinct values:
+- `cc_name` is the same string as `name`;
+- the login username and account number repeat the profile ones.
+
+A hit is reported against all the fields sharing that value, e.g. `name,cc_name`.
+
+**`kind`:** what sort of data it is: `identity`, `contact`, `government_id`, `financial`,
+`address`, `credential`, `crypto`. Used later to say *what* leaked (e.g. "a credential and a
+government ID", not just "3 tokens").
+
+### Strong vs. weak
+
+| Strength | Values | Rule |
+|---|---|---|
+| **strong** (12) | name, username, email, account number, SSN, phone, street address, password, OpenAI key, Robinhood key, bitcoin address, bitcoin key | Distinctive enough that a match isn't a coincidence. **A strong value reaching a non-honeypot host outside the setup phase is a leak.** |
+| **weak** (7) | `Testville`, `ZZ`, `00000`, `1990-01-15`, `4111111111111111`, `2030-12`, `123` | Generic: `123` and `00000` appear in ordinary traffic constantly, `4111…` is the standard Visa test number, and dates and `ZZ` are short. Reported in a separate column, **never counted as a leak on their own**. They're still useful as corroboration: a request with the SSN *and* `4111…` *and* `123` is clearly the whole form |
+
+The loader enforces a minimum length of 8 characters for anything marked strong, so a short value
+can't be marked strong by mistake.
+
+### Alternate forms (`alts`)
+Code often normalises data before sending it, e.g. a form library stripping punctuation. Two
+values get a digits-only form as an extra needle:
+- **SSN** `900-12-3456` → also `900123456`.
+- **Phone** `+1-202-555-0147` → also `2025550147`, the national number without the country code.
+  That one form also catches `12025550147` and `+12025550147`, since they contain it.
+
+Other transformations (lowercase, URL-encoding, base64, hex, JSON escaping, compression) aren't
+listed here. The detector applies them to every value automatically (step 4).
+
+### Note for step 4: overlapping values
+`mira.holloway` is inside `mira.holloway@example.com`, so every email hit is also a username hit.
+The detector should report the longer token for that spot and not double-count.
+
+### Making it general
+Nothing here is specific to an extension. To use a different honeypot, edit this file: hosts,
+pages, values. The loader validates it:
+- the honeypot hosts are present;
+- every entry has a value and fields;
+- strong values are at least 8 characters;
+- no value repeats, ignoring case.
+
+### How it was checked
+- `dyn.py tokens --check` against the live site: all 19 values present on the 6 pages.
+- `tests/test_tokens.py` (6 tests, all passing):
+  - all 22 honeypot fields are covered;
+  - the weak set is exactly the 7 generic values;
+  - the digit-only alts are right;
+  - the password is a strong credential;
+  - validation catches a too-short strong value, a case-insensitive duplicate, and missing honeypot hosts;
+  - `--check` reports a value that's missing from the pages (with a fake fetch, no network).
+- Full suite: 26 tests, all passing.
