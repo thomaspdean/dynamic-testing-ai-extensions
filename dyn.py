@@ -3,11 +3,13 @@
 
 Drop a .crx into extensions/ (or pass any path), then:
   python3 dyn.py info zetoe            # what the harness reads from the file
+  python3 dyn.py prepare zetoe --verify   # unpack with its real ID; prove it in Chrome (network blocked)
 
-More subcommands (prepare, doctor, run, summarize) are added step by step; see docs/WALKTHROUGH.md.
+More subcommands (doctor, run, summarize) are added step by step; see docs/WALKTHROUGH.md.
 """
 import argparse
 import sys
+from pathlib import Path
 
 if sys.version_info < (3, 10):
     sys.exit("dyn.py needs Python 3.10+")
@@ -38,6 +40,38 @@ def cmd_info(a):
             print("\n".join(f"{k:>22}: {v}" for k, v in d.items()) + "\n")
 
 
+def cmd_prepare(a):
+    from dyntest import browser
+    from dyntest.prepare import prepare
+
+    chrome = None
+    if a.verify:
+        chrome = browser.find_cft()
+        if not chrome:
+            sys.exit("--verify needs Chrome for Testing (set DYN_CHROME or see README)")
+    selectors = a.ext or sorted(f.name for f in EXT_DIR.glob("*.crx"))
+    failed = 0
+    for s in selectors:
+        try:
+            path = resolve(s)
+            crx = read_crx(path)
+            rec = prepare(crx, path, force=a.force)
+        except (FileNotFoundError, CrxError) as e:
+            print(f"FAIL {s}: {e}")
+            failed += 1
+            continue
+        line = f"{path.stem:<12} {rec['ext_id']}  v{rec['version']:<16} key {rec['key']:<8}"
+        if chrome:
+            ok, seen, tail = browser.verify_load(chrome, Path(rec["path"]), rec["ext_id"])
+            line += "  Chrome: " + ("loaded with this ID" if ok else f"NOT loaded as this ID (saw {list(seen) or 'none'})")
+            if not ok:
+                failed += 1
+                line += "\n" + tail
+        print(line)
+    if failed:
+        sys.exit(f"{failed} failed")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="dyn.py", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -47,6 +81,13 @@ def main(argv=None):
     s.add_argument("ext", nargs="*", help="a .crx path, a file name in extensions/, or an extension ID")
     s.add_argument("--brief", action="store_true", help="one line per extension")
     s.set_defaults(fn=cmd_info)
+
+    s = sub.add_parser("prepare", help="unpack .crx file(s) into build/ with the manifest key (run does this itself)")
+    s.add_argument("ext", nargs="*", help="a .crx path, a file name in extensions/, or an extension ID (default: all)")
+    s.add_argument("--force", action="store_true", help="re-unpack even if a cached unpack of the same file exists")
+    s.add_argument("--verify", action="store_true",
+                   help="load it in headless Chrome for Testing (network blocked) and check the ID Chrome assigns")
+    s.set_defaults(fn=cmd_prepare)
 
     a = p.parse_args(argv)
     a.fn(a)

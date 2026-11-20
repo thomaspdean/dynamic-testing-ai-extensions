@@ -50,7 +50,7 @@ flowchart TD
 | Step | Piece | Status |
 |---|---|---|
 | 1 | Read an extension from its `.crx` (parser + `dyn.py info`) | **done** |
-| 2 | Unpack with the manifest `key` so it keeps its real ID (automatic in `run`; `dyn.py prepare` to check it alone) | |
+| 2 | Unpack with the manifest `key` so it keeps its real ID (automatic in `run`; `dyn.py prepare` to check it alone) | **done** |
 | 3 | `data/tokens.json`: the values the detector looks for | |
 | 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | |
 | 5 | `dyn.py doctor`: environment check | |
@@ -146,3 +146,77 @@ the scan.
 
 Independent cross-check: for all 15 CS6262 packages, the ID, version, SHA-256 and name read from
 the files alone matched what the static scan recorded when it downloaded them.
+
+---
+
+## Step 2: Unpack with the real ID (`prepare`)
+
+### What it does
+```
+python3 dyn.py prepare zetoe            # unpack one
+python3 dyn.py prepare                  # unpack every .crx in extensions/
+python3 dyn.py prepare --verify         # ...and prove the ID in a real Chrome
+```
+`run` calls the same code automatically. `prepare` exists so you can check a new extension before
+starting a capture.
+
+**Input:** the `.crx` from step 1.
+
+**Output:** `build/extensions/<ext_id>/`, a folder Chrome loads with `--load-extension`, plus
+`build/extensions/<ext_id>.prepared.json`, which records the source file, its SHA-256, the
+version, and what happened to the key. `build/` is git-ignored and can be deleted at any time.
+
+### The steps
+1. **Safe unzip** of every file in the package. Paths that are absolute or contain `..` are
+   refused, so a malicious package can't write outside `build/`.
+2. **Set `manifest.json` `"key"`** to the developer public key from the CRX header (step 1).
+   - If the manifest already has the *same* key, it's left alone (`key kept`).
+   - A *different* key is replaced (`key replaced`). Otherwise the key is added (`key added`).
+   - **This is the only change made to the package.** Every other file is byte-for-byte the
+     original, so we're testing the developer's code.
+3. **Recompute the ID** from the key that was written, and require it to equal the CRX's ID.
+4. **Cache by SHA-256:** the same file reuses its unpack. A different file (e.g. a new version
+   with the same ID) always gets a fresh unpack, so a run can never use stale code.
+
+### `--verify`: proving it in a real browser
+Computing the ID ourselves only shows the arithmetic is right. `--verify` asks Chrome itself:
+1. Launch Chrome for Testing **headless**, with a brand-new throwaway profile and only this
+   extension loaded.
+2. Point its proxy at a closed local port (`127.0.0.1:9`). **Every network request fails
+   locally**, so whatever the extension does at startup (install pages, analytics, config fetches)
+   never reaches its servers. That keeps us within "no traffic to extension backends beyond
+   normal use".
+3. Wait ~6 s, shut Chrome down gracefully (so it writes its profile files), and read the
+   profile's `Default/Secure Preferences` → `extensions.settings`, where Chrome records each
+   installed extension's ID and folder.
+4. Pass if the ID Chrome recorded for our folder equals the store ID, then delete the profile.
+
+`run` (step 6) will do the same profile check on the real capture profile.
+
+**The macOS Keychain prompt and `--use-mock-keychain`:** on macOS, Chrome asks the Keychain for
+"Chrome Safe Storage" (the key it encrypts cookies and passwords with) when it opens a profile.
+Chrome for Testing is a separate app, so macOS shows a permission popup, and Chrome **blocks until
+it's answered**. The first `--verify` attempt hung for exactly this reason. Every Chrome the
+harness launches gets `--use-mock-keychain`, a fake in-memory keychain, so there's no popup and
+the real Keychain is never touched. If the popup appears anyway, click **Deny**.
+
+### Findings while building this
+- **`_metadata/` is kept.** Every store package has `_metadata/verified_contents.json` (the Web
+  Store's signature of the files). I expected Chrome to refuse an unpacked folder containing it,
+  because names starting with `_` are reserved. Tested with Chrome for Testing 131, it loads fine,
+  so nothing is removed.
+- **12 of the 15 needed a key added.** AITOPIA, QuestionAI and Spekit already ship the right key.
+
+### How it was checked
+- **`dyn.py prepare --verify` on all 15 CS6262 packages:** each loaded in Chrome under its real
+  store ID (12 key added, 3 kept), in about 6 s each.
+- **`tests/test_prepare.py`** (7 tests, all passing):
+  - **Synthetic packages:** the key is added, kept or replaced correctly. Every other file,
+    including `_metadata/`, is unchanged. The cache is reused for the same file and redone for a
+    different one. `../` paths are refused and nothing is written outside `build/`.
+  - **Real Chrome, positive:** a keyed copy loads as its store ID.
+  - **Real Chrome, negative control:** the same folder *without* `key` still loads, but under a
+    different ID, and the check reports a failure. This proves the check isn't something that
+    always passes.
+  - The Chrome tests are skipped automatically if Chrome for Testing or a `.crx` isn't available.
+- Full suite: `python3 -m unittest discover tests` gives 20 tests, all passing (~13 s).
