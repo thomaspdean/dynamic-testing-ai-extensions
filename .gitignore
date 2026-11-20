@@ -1,0 +1,21 @@
+# Captures and run output contain test-account tokens and session cookies.
+# They go to the team's private Drive folder, never to git.
+runs/
+results/
+*.mitm
+*.har
+hits.jsonl
+requests.jsonl
+
+# Extension packages: third-party code, 5-30 MB each. Shared via the private Drive folder;
+# each run records the file's SHA-256 in its meta.json.
+extensions/*.crx
+
+# Generated: keyed, unpacked extensions and throwaway Chrome profiles
+build/
+profiles/
+
+# Python / OS noise
+__pycache__/
+*.pyc
+.DS_Store
