@@ -7,8 +7,17 @@ and flags any of that data leaving, along with where it went.
 Built for a CS 6262 study of GenAI browser extensions, but it works with any extension.
 Python 3.10+ (standard library only), mitmproxy, and Chrome for Testing.
 
-> **Status:** being built step by step. `info`, `prepare` and `tokens` work today. `doctor`, `run`
-> and `summarize` are next, so the browsing flow below is the plan they implement.
+> **Status:** being built step by step. `doctor`, `info`, `prepare` and `tokens` work today.
+> `run` and `summarize` are next, so the browsing flow below is the plan they implement.
+
+## Setup
+
+1. Install **mitmproxy** (macOS: `brew install --cask mitmproxy`; otherwise https://mitmproxy.org).
+2. Install **Chrome for Testing**: `npx @puppeteer/browsers install chrome@stable`. Branded Google
+   Chrome is only needed for extensions that sign in with `chrome.identity.getAuthToken`.
+3. Put the `.crx` files you want to test in `extensions/`.
+4. Run `python3 dyn.py doctor`. It checks everything below and creates mitmproxy's certificate the
+   first time. Fix anything marked `FAIL`.
 
 ## How it works
 

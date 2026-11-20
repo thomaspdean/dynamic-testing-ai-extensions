@@ -2,11 +2,12 @@
 """Dynamic testing harness CLI. Python 3.10+, standard library only.
 
 Drop a .crx into extensions/ (or pass any path), then:
+  python3 dyn.py doctor               # check this machine; creates mitmproxy's CA on first use
   python3 dyn.py info zetoe            # what the harness reads from the file
   python3 dyn.py prepare zetoe --verify   # unpack with its real ID; prove it in Chrome (network blocked)
   python3 dyn.py tokens --check        # the honeytokens; confirm they're still on the live honeypot
 
-More subcommands (doctor, run, summarize) are added step by step; see docs/WALKTHROUGH.md.
+More subcommands (run, summarize) are added step by step; see docs/WALKTHROUGH.md.
 """
 import argparse
 import sys
@@ -73,6 +74,20 @@ def cmd_prepare(a):
         sys.exit(f"{failed} failed")
 
 
+def cmd_doctor(a):
+    from dyntest.doctor import FAIL, run_checks
+
+    marks = {"OK": "  ok ", "WARN": " WARN", "FAIL": " FAIL", "INFO": "     "}
+    failed = 0
+    for status, what, detail, fix in run_checks(online=not a.offline):
+        print(f"{marks[status]}  {what:<34} {detail}")
+        if fix:
+            print(f"{'':7}{'':<34} → {fix}")
+        failed += status == FAIL
+    print("\nready" if not failed else f"\n{failed} problem(s) to fix before running captures")
+    sys.exit(1 if failed else 0)
+
+
 def cmd_tokens(a):
     from dyntest import tokens
 
@@ -114,6 +129,10 @@ def main(argv=None):
     s.add_argument("--verify", action="store_true",
                    help="load it in headless Chrome for Testing (network blocked) and check the ID Chrome assigns")
     s.set_defaults(fn=cmd_prepare)
+
+    s = sub.add_parser("doctor", help="check mitmproxy, its CA, Chrome, ports and the honeypot")
+    s.add_argument("--offline", action="store_true", help="skip the live honeypot check")
+    s.set_defaults(fn=cmd_doctor)
 
     s = sub.add_parser("tokens", help="list the honeytokens in data/tokens.json")
     s.add_argument("--check", action="store_true", help="fetch the honeypot pages and confirm every value is still there")

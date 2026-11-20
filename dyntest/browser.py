@@ -53,6 +53,77 @@ def loaded_extensions(profile: Path) -> dict[str, str]:
     return out
 
 
+def chrome_version(chrome: Path) -> str:
+    import re
+    import subprocess
+    try:
+        out = subprocess.run([str(chrome), "--version"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    m = re.search(r"(\d+\.\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else ""
+
+
+def chrome_flags(profile: Path, proxy: str | None = None, spki: str | None = None,
+                 extension: Path | None = None) -> list[str]:
+    """The flags every Chrome the harness starts gets (doctor, prepare --verify, run)."""
+    flags = [
+        f"--user-data-dir={profile}",          # fresh throwaway profile; also required for the SPKI flag
+        "--use-mock-keychain",                 # macOS: never prompt for / touch the real Keychain
+        "--no-first-run", "--no-default-browser-check",
+        "--disable-sync",                      # no Google account sync traffic
+        "--disable-background-networking",     # no Chrome background fetches (variations, suggestions...)
+        "--disable-component-update",          # no component updater downloads
+        "--disable-quic",                      # QUIC (HTTP/3 over UDP) would bypass the HTTP proxy
+        "--disable-features=DisableLoadExtensionCommandLineSwitch",
+    ]
+    if proxy:
+        flags.append(f"--proxy-server={proxy}")
+    if spki:
+        flags.append(f"--ignore-certificate-errors-spki-list={spki}")  # trust mitmproxy's CA, this profile only
+    if extension:
+        flags += [f"--load-extension={extension}", f"--disable-extensions-except={extension}"]
+    return flags
+
+
+def check_trust(chrome: Path, proxy_port: int, spki: str | None, events: Path,
+                host: str = "dyn-doctor.test", timeout: float = 20) -> tuple[bool, str]:
+    """Open https://<host>/ in headless Chrome through the proxy; True once mitmproxy saw the request.
+
+    Pair with dyntest/mitm_selftest.py (writing to `events`): it answers inside mitmproxy, so
+    nothing leaves the machine. mitmproxy only sees the request if Chrome accepted its certificate.
+    """
+    import subprocess
+    import tempfile
+    import time
+
+    events.write_text("")
+    profile = Path(tempfile.mkdtemp(prefix="dyn-doctor-"))
+    proc = subprocess.Popen([str(chrome), "--headless=new",
+                             *chrome_flags(profile, f"127.0.0.1:{proxy_port}", spki), f"https://{host}/"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            seen = events.read_text()
+            if f"request {host}" in seen:
+                return True, seen
+            if f"tls_failed {host}" in seen:
+                return False, "Chrome rejected mitmproxy's certificate"
+            if proc.poll() is not None:
+                return False, f"Chrome exited early (code {proc.returncode})"
+            time.sleep(0.2)
+        return False, "no request reached the proxy"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def verify_load(chrome: Path, ext_dir: Path, ext_id: str, settle: float = 6.0) -> tuple[bool, dict, str]:
     """Load ext_dir in a throwaway headless profile and return (loaded under ext_id?, ids seen, log tail).
 
@@ -65,13 +136,8 @@ def verify_load(chrome: Path, ext_dir: Path, ext_id: str, settle: float = 6.0) -
 
     profile = Path(tempfile.mkdtemp(prefix="dyn-verify-"))
     log = profile / "chrome.log"
-    args = [str(chrome), f"--user-data-dir={profile}", "--headless=new",
-            "--use-mock-keychain",  # macOS: never prompt for / touch the real Keychain
-            "--no-first-run", "--no-default-browser-check", "--disable-sync",
-            "--disable-background-networking", "--disable-component-update",
-            "--proxy-server=127.0.0.1:9",  # discard port: every request fails locally
-            "--disable-features=DisableLoadExtensionCommandLineSwitch",
-            f"--load-extension={ext_dir}", f"--disable-extensions-except={ext_dir}",
+    args = [str(chrome), "--headless=new",
+            *chrome_flags(profile, proxy="127.0.0.1:9", extension=ext_dir),  # port 9: requests fail locally
             "--enable-logging=stderr", "--v=0", "about:blank"]
     try:
         with open(log, "wb") as lf:

@@ -30,7 +30,7 @@ The user-level flow (diagram, browsing steps, files) is in [`README.md`](../READ
 | 2 | Unpack with the manifest `key` so it keeps its real ID (automatic in `run`; `dyn.py prepare` to check it alone) | **done** |
 | 3 | `data/tokens.json`: the values the detector looks for | **done** |
 | 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | **done** |
-| 5 | `dyn.py doctor`: environment check | |
+| 5 | `dyn.py doctor`: environment check | **done** |
 | 6 | `dyn.py run`: one guided capture | |
 | 7 | `dyn.py summarize`: results tables | |
 | 8 | `README.md` usage guide | |
@@ -401,3 +401,109 @@ non-alphanumeric characters. Otherwise `123` would match inside every number.
   - the honeypot cookie is flagged `to_honeypot`;
   - `flows.mitm` is written.
 - Full suite: **51 tests** pass (~14 s).
+
+---
+
+## Step 5: Environment check (`doctor`)
+
+### What it does
+```
+python3 dyn.py doctor            # all checks
+python3 dyn.py doctor --offline  # skip the live honeypot check
+```
+It prints one line per check: `ok`, `WARN` (works, with a caveat), `FAIL` (captures won't work
+until fixed, with the fix on the next line), or info. It exits non-zero if anything failed. It is
+the first thing a new tester runs, and the only command that changes anything outside the repo:
+it creates mitmproxy's certificate authority in `~/.mitmproxy` if there isn't one.
+
+| Check | Passes when | If not |
+|---|---|---|
+| Python | 3.10+ | install it |
+| mitmproxy | `mitmdump` and `mitmweb` are on `PATH`; version shown | install hint for the OS |
+| mitmproxy CA | `~/.mitmproxy/mitmproxy-ca-cert.pem` exists. If not, `doctor` starts mitmdump once so it creates one | n/a |
+| CA SPKI hash | computed from the CA (shown for reference) | n/a |
+| Chrome for Testing | found (newest under `~/.cache/puppeteer/chrome`, or `$DYN_CHROME`); version shown | install command |
+| Google Chrome (branded) | found; version shown | `WARN` only if an extension in `extensions/` needs it (has an `oauth2` manifest section) |
+| **Each browser → proxy → HTTPS** | a headless Chrome, given the SPKI flag, completes an HTTPS request through mitmproxy | `FAIL`: captures would be empty or broken |
+| Ports 8080 / 8081 | free (proxy, mitmweb UI) | `WARN` with how to find what's using it |
+| `extensions/` | every `.crx` readable; Chrome for Testing new enough for each `minimum_chrome_version`; lists those needing branded Chrome | `FAIL` per bad file or too-old Chrome |
+| honeypot | reachable and every token value still on it (same as `tokens --check`) | `FAIL` if values changed, `WARN` if unreachable |
+
+### How Chrome trusts mitmproxy, and only in the test profile
+To read HTTPS, mitmproxy presents certificates signed by its own CA. Normally you'd install that
+CA in the system keychain, which makes **every** app on the machine trust it. Instead, the harness
+starts Chrome with:
+```
+--ignore-certificate-errors-spki-list=<base64(SHA-256(the CA's SubjectPublicKeyInfo))>
+```
+Chrome then accepts certificates chaining to that one key, and only in a Chrome started with that
+flag **and** a `--user-data-dir`. Your normal browser and the rest of the system are unaffected.
+
+The hash is computed with the standard library. `dyntest/mitm.py` has a small DER reader that walks
+the certificate to its `SubjectPublicKeyInfo` and hashes it, so no `cryptography` package is
+needed. It matches `openssl x509 -pubkey | openssl pkey -pubin -outform der | openssl dgst
+-sha256 -binary | base64` exactly.
+
+### The end-to-end trust check (nothing leaves the machine)
+1. Start mitmdump with `dyntest/mitm_selftest.py`, a tiny addon that **answers every request
+   itself**. With `connection_strategy=lazy`, mitmproxy never connects to a real server.
+2. Start headless Chrome with the harness's normal flags plus the SPKI flag, opening
+   `https://dyn-doctor.test/` (`.test` is a reserved, non-existent domain).
+3. The addon writes `request dyn-doctor.test` if Chrome completed TLS with mitmproxy's certificate
+   and sent the request, or `tls_failed dyn-doctor.test` if Chrome rejected it.
+   **Pass = the request arrived.**
+
+Both browsers are checked: Chrome for Testing 131 and branded Chrome 157 (used for OG AI).
+
+### Shared Chrome flags
+`dyntest/browser.py → chrome_flags()` is now the single list every Chrome the harness starts gets:
+`doctor`, `prepare --verify`, and `run`.
+
+| Flag | Why |
+|---|---|
+| `--user-data-dir=<fresh dir>` | throwaway profile: no cookies or history carried between runs. Also required for the SPKI flag |
+| `--use-mock-keychain` | macOS: no Keychain popup, real Keychain untouched (found in step 2) |
+| `--no-first-run --no-default-browser-check` | no first-run UI |
+| `--disable-sync --disable-background-networking --disable-component-update` | cuts Chrome's own background traffic, so captures are mostly the page and the extension |
+| `--disable-quic` | HTTP/3 runs over UDP and would bypass the HTTP proxy, so it's turned off |
+| `--disable-features=DisableLoadExtensionCommandLineSwitch` | keeps `--load-extension` working |
+| `--proxy-server=127.0.0.1:<port>` | all traffic through mitmproxy |
+| `--ignore-certificate-errors-spki-list=<hash>` | trust mitmproxy, this profile only |
+| `--load-extension=<dir> --disable-extensions-except=<dir>` | exactly one extension |
+
+### Found while building this
+- **`--dump-dom` hangs intermittently.** The first version asked Chrome to print the page and exit.
+  Chrome for Testing 131 sometimes hung for 40 s+ (passed 0.6 s, then hung, on back-to-back runs).
+  The check now relies on proxy-side evidence: did mitmproxy receive the decrypted request? That is
+  also the more meaningful test. It passed 3/3 consecutive `doctor` runs.
+- The shared marker constant first lived in the addon file, which imports `mitmproxy`, so our
+  Python couldn't import it. Addon files must not be imported by our own code.
+
+### Output on this machine
+```
+  ok   Python                             3.14.7
+  ok   mitmproxy                          12.3.1
+  ok   mitmproxy CA                       ~/.mitmproxy/mitmproxy-ca-cert.pem  (created now)
+       CA SPKI hash                       jq5jYfeWx/XN2Pj5DQSlVpFr6/HjFr6eW62a24GtR0M=
+  ok   Chrome for Testing                 131.0.6778.204
+  ok   Google Chrome (branded)            157.0.8103.80
+  ok   Chrome for Testing → proxy → HTTPS trusts mitmproxy in a test profile (…nothing left this machine)
+  ok   Google Chrome → proxy → HTTPS      trusts mitmproxy in a test profile (…)
+  ok   proxy port 8080                    free
+  ok   mitmweb UI port 8081               free
+  ok   extensions/                        15 .crx readable; branded Chrome needed for: ogai
+  ok   honeypot                           reachable; all token values present
+ready
+```
+(The SPKI hash is specific to each machine's CA. Each tester's `doctor` shows their own.)
+
+### How it was checked
+- `tests/test_doctor.py` (6 tests, all passing; temp mitmproxy config dir, never `~/.mitmproxy`):
+  - **DER reader:** finds the SPKI in synthetic certificates with and without the version field
+    and with long-form lengths; rejects garbage; PEM round trip.
+  - **Real CA:** mitmdump creates one, and a second call reuses it.
+  - **The hash equals `openssl`'s** for that real CA.
+  - **Real Chrome, positive and negative:** with the SPKI flag the HTTPS request reaches the proxy;
+    **without it Chrome rejects the certificate** (`tls_failed`). So the check can genuinely fail.
+- `dyn.py doctor` run for real 4 times on this machine: all `ok` after the `--dump-dom` fix.
+- Full suite: **57 tests**, all passing (~17 s).
