@@ -7,8 +7,8 @@ and flags any of that data leaving, along with where it went.
 Built for a CS 6262 study of GenAI browser extensions, but it works with any extension.
 Python 3.10+ (standard library only), mitmproxy, and Chrome for Testing.
 
-> **Status:** being built step by step. `doctor`, `info`, `prepare` and `tokens` work today.
-> `run` and `summarize` are next, so the browsing flow below is the plan they implement.
+> **Status:** being built step by step. `doctor`, `run`, `info`, `prepare` and `tokens` work
+> today; `summarize` (results tables) is next.
 
 ## Setup
 
@@ -127,13 +127,18 @@ Timed phases count down by themselves; the others wait for Enter. About 10–15 
 | **active** | ~1 min per feature | Type a feature name (`summarize`, `chat`, `select-text`, `autofill`, `translate`…), use that feature on the honeypot page, press Enter. Repeat per feature, then type `done`. |
 | **notes** | 1–2 min | Fill in `notes.md`: account used, what didn't work, anything odd. |
 
-Honeypot steps for the passive phase (values are prefilled, so don't edit them):
+Honeypot steps for the passive phase (`run` opens the start page and prints these; the fields are
+prefilled, so don't edit them):
 
 | Mode | Steps on [quillbert.github.io/honey/](https://quillbert.github.io/honey/) | Puts the fake data in |
 |---|---|---|
-| `session` | `/session/` → **Log in** → **Continue** → stay on results | form fields, a password box, sessionStorage, page text |
-| `url` | `/url/` → **Log in** → **Continue** → stay on results | the page URL (including the password), hidden inputs, page text |
-| `cookies` | `/cookies/` → **Set cookies** → `/cookies/read/` → back to `/cookies/` | the browser's cookies |
+| `session` | `/session/` → **Sign in securely** → **Review information** → scroll the results page, hands off | form fields, a password box, sessionStorage, page text |
+| `url` | `/url/` → **Sign in securely** → **Review information** → scroll the results page, hands off | the page URL (including the password), hidden inputs, page text |
+| `cookies` | `/cookies/` → **Set cookies** → open `/cookies/read/` → back to `/cookies/`, hands off | the browser's cookies |
+
+While it runs, the terminal prints a line for each fake value seen going to a non-honeypot host,
+e.g. `⚑ ssn → api.example.com (body, raw, passive)`. It also shows a link to mitmweb's live view
+of all traffic. Ctrl-C at any point still closes Chrome and saves the capture.
 
 Run each mode as its own run; each gets a fresh browser profile. Also do one **control run** per
 mode, `dyn.py run control --mode <mode>`: the same steps with no extension, so Chrome's own

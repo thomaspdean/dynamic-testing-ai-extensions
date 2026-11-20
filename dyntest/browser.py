@@ -75,7 +75,7 @@ def chrome_flags(profile: Path, proxy: str | None = None, spki: str | None = Non
         "--disable-background-networking",     # no Chrome background fetches (variations, suggestions...)
         "--disable-component-update",          # no component updater downloads
         "--disable-quic",                      # QUIC (HTTP/3 over UDP) would bypass the HTTP proxy
-        "--disable-features=DisableLoadExtensionCommandLineSwitch",
+        "--disable-features=DisableLoadExtensionCommandLineSwitch,AutofillServerCommunication",  # keep --load-extension; no form data to Google autofill
     ]
     if proxy:
         flags.append(f"--proxy-server={proxy}")

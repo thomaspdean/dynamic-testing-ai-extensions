@@ -31,7 +31,7 @@ The user-level flow (diagram, browsing steps, files) is in [`README.md`](../READ
 | 3 | `data/tokens.json`: the values the detector looks for | **done** |
 | 4 | Detector: encoding-aware matcher + mitmproxy addon, with tests | **done** |
 | 5 | `dyn.py doctor`: environment check | **done** |
-| 6 | `dyn.py run`: one guided capture | |
+| 6 | `dyn.py run`: one guided capture | **done** |
 | 7 | `dyn.py summarize`: results tables | |
 | 8 | `README.md` usage guide | |
 | 9 | Self-test: control run plus a pilot on Zetoe or Devi | |
@@ -507,3 +507,104 @@ ready
     **without it Chrome rejects the certificate** (`tls_failed`). So the check can genuinely fail.
 - `dyn.py doctor` run for real 4 times on this machine: all `ok` after the `--dump-dom` fix.
 - Full suite: **57 tests**, all passing (~17 s).
+
+---
+
+## Step 6: One guided capture (`run`)
+
+### What it does
+```
+python3 dyn.py run zetoe --mode session        # an extension: file name, path or ID
+python3 dyn.py run control --mode session      # no extension: Chrome's own traffic
+   [--browser cft|chrome] [--baseline 120] [--passive 180] [--proxy-port 8080] [--web-port 8081]
+   [--discard-profile]
+```
+`run` ties steps 1–5 together. The tester only follows prompts.
+
+| Stage | What happens | Built on |
+|---|---|---|
+| 1. Prepare | read the `.crx`; unpack with its real ID (cached); pick the browser (branded Chrome if the manifest has `oauth2`); make sure the CA exists and compute its SPKI hash; check ports 8080/8081 are free | steps 1, 2, 5 |
+| 2. Run folder | `runs/<YYYY-MM-DD_HHMM>_<name>_<mode>/` (with `-2`, `-3` suffixes if it exists); `meta.json` written straight away | n/a |
+| 3. Proxy | `mitmweb` on 127.0.0.1 with the detector addon, saving `flows.mitm` (streamed) and `flows.har` (on exit). Its UI is protected by a random token; the link is printed. It doesn't open a browser | step 4 |
+| 4. Chrome | a visible Chrome with a fresh profile in `<run>/profile/`, the shared flags (step 5), and only this extension. Both processes run in their own session, so Ctrl-C reaches only `run`, which then shuts them down in order | step 5 |
+| 5. Phases | prompts and countdowns (below). Every transition is written to `phase` (read live by the detector) and `phases.jsonl` | step 4 |
+| 6. Shutdown | Chrome first (graceful, so its profile files are written), then mitmweb with SIGINT (writes the HAR); re-check the extension ID; write the summary into `meta.json`; optionally delete the profile | n/a |
+
+### The phases as the tester sees them
+| Phase | Prompt | Ends |
+|---|---|---|
+| `setup` (extensions only) | sign in with a throwaway account, finish onboarding, close welcome tabs, don't open the honeypot. For branded Chrome: the exact "Load unpacked" steps and folder path | Enter; then the extension ID is confirmed from the profile's `Secure Preferences` (up to 20 s) |
+| `startup` (control only) | none: just Chrome launching | automatically |
+| `baseline` | opens example.com; "don't touch anything" | timer (default 2 min) or Enter |
+| `passive` | opens the mode's start page and prints its steps from `tokens.json` → `honeypot.flows`; "don't click the extension" | timer (default 3 min) or Enter |
+| `active:<feature>` (extensions only) | type a feature name; use it; Enter. Repeat; `done` ends | `done` |
+| `notes` | writes a `notes.md` template and asks you to fill it in | Enter |
+| `finished` | written at shutdown, also after Ctrl-C | n/a |
+
+While countdowns run, new **strong hits to non-honeypot hosts outside setup** are printed live,
+e.g. `⚑ ssn → api.x.com (body, raw, passive)`.
+
+**Opening pages** in the tester's window: `run` launches the same Chrome binary again with the
+same `--user-data-dir` and a URL. Chrome hands the URL to the already-running browser as a new tab.
+No remote-debugging port is needed.
+
+**The honeypot steps moved into `data/tokens.json`** (`honeypot.flows.<mode>`: start path and
+steps), so `run` contains nothing honeypot-specific. The step text uses the site's real button
+labels, "Sign in securely" and "Review information", which were checked against the live pages.
+The README had them wrong ("Log in / Continue") until this step.
+
+### `meta.json`
+- **What was tested:** mode; control or not; the extension's label, file, ID, name, version,
+  SHA-256, whether its manifest had a key, whether it needs branded Chrome, and the unpacked path.
+- **With what:** browser kind, path and version; mitmproxy version, CA SPKI hash and ports; the
+  honeypot URL; the host OS and Python.
+- **When:** start and end time, phases completed, `aborted` (Ctrl-C), and `id_confirmed`
+  (`true`/`false`, or `null` for control).
+- **`summary`:**
+  - requests and distinct hosts;
+  - token hits;
+  - **leak hits** (strong, non-honeypot, outside setup), with the fields and hosts;
+  - TLS handshakes that didn't complete (host and reason);
+  - capture file sizes.
+
+### Found while building this
+- **Back-to-back runs were blocked.** After a run, the proxy port has connections in TCP
+  TIME_WAIT for about a minute. The plain "is the port free?" bind failed on them, so a second run
+  would have refused to start. The check now binds like a server (`SO_REUSEADDR`) and still detects
+  a port something is really listening on.
+- **The mitmweb UI link was missing its token.** mitmweb buffers its log, so the token line
+  wasn't there yet when read. `run` now generates the token itself and passes it as `web_password`.
+  Checked: the right token gives 200, none or a wrong one gives 403.
+- **Chrome's own autofill service** (`content-autofill.googleapis.com`) appeared in a control
+  run's passive phase: Chrome reports form structure to Google. Since the passive phase is all
+  forms, `--disable-features=AutofillServerCommunication` was added to the shared flags.
+  `accounts.google.com` and `clients2.google.com` also appear with no extension. That's exactly
+  what the control run is for.
+- The one `tls_failed` seen in a control run was Chrome closing an `accounts.google.com`
+  connection early, not certificate pinning. The end-of-run message now lists host and reason
+  instead of a vague warning.
+
+### How it was checked
+- `tests/test_run.py` (2 tests, ~22 s). Real mitmweb + detector + headless Chrome for Testing,
+  short timers, answers scripted instead of typed:
+  - **Full extension run** with a tiny local test extension (real RSA key from `openssl`, so
+    Chrome accepts its manifest key). Its service worker keeps POSTing the fake SSN and a
+    base64'd password over plain HTTP to `dyn-run-test.test`, a reserved name that doesn't exist.
+    mitmproxy records the request and then fails to forward it, so nothing leaves the machine.
+    Checks:
+    - phases are exactly `setup, baseline, passive, active:summarize, notes, finished`, in both
+      `meta.json` and `phases.jsonl`;
+    - **the ID is confirmed in the live profile**;
+    - the SSN and password are found as leaks from the extension's origin, the password as base64;
+    - the summary counts them;
+    - `flows.mitm` and `flows.har` are non-empty, and `notes.md` and the profile exist;
+    - both ports are free afterwards.
+  - **Ctrl-C** (end-of-input at the notes prompt) in a control run: `aborted` is true, phases are
+    closed with `finished`, the end time is set, `flows.mitm` exists, and `--discard-profile`
+    removed the profile.
+- A short **visible** control run: the URL handoff works (example.com in `baseline`, the
+  honeypot in `passive`).
+- Full suite: **59 tests**, all passing (~37 s).
+
+Not yet exercised: a real extension against the real honeypot with a real account. That's the
+step 9 pilot.

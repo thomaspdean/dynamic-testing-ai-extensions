@@ -41,7 +41,11 @@ def free_port() -> int:
 
 
 def port_free(port: int) -> bool:
+    """True if nothing is listening on the port. Like a server, ignores connections in TIME_WAIT
+    (left for ~1 min after the previous run), which would otherwise block back-to-back runs."""
     with socket.socket() as s:
+        if os.name != "nt":
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return True

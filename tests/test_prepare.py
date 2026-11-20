@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # tests/ (shared helpers)
 from dyntest import EXT_DIR, browser, prepare as prep  # noqa: E402
 from dyntest.crx import CrxError, id_from_public_key, parse_crx, read_crx  # noqa: E402
 from test_crx import _zip, make_crx3  # noqa: E402

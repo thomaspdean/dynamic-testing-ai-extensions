@@ -29,6 +29,9 @@ def validate(doc: dict) -> list[str]:
     hp = doc.get("honeypot", {})
     if not hp.get("hosts"):
         problems.append("honeypot.hosts is empty (needed to tell honeypot traffic from leaks)")
+    for mode, flow in hp.get("flows", {}).items():
+        if not flow.get("start") or not flow.get("steps"):
+            problems.append(f"honeypot.flows.{mode}: needs a start path and steps")
     seen = {}
     for i, t in enumerate(doc.get("tokens", [])):
         where = f"tokens[{i}]"

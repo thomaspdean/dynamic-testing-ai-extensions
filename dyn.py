@@ -3,11 +3,12 @@
 
 Drop a .crx into extensions/ (or pass any path), then:
   python3 dyn.py doctor               # check this machine; creates mitmproxy's CA on first use
+  python3 dyn.py run zetoe --mode session   # one guided capture (also: run control --mode ...)
   python3 dyn.py info zetoe            # what the harness reads from the file
   python3 dyn.py prepare zetoe --verify   # unpack with its real ID; prove it in Chrome (network blocked)
   python3 dyn.py tokens --check        # the honeytokens; confirm they're still on the live honeypot
 
-More subcommands (run, summarize) are added step by step; see docs/WALKTHROUGH.md.
+More subcommands (summarize) are added step by step; see docs/WALKTHROUGH.md.
 """
 import argparse
 import sys
@@ -74,6 +75,14 @@ def cmd_prepare(a):
         sys.exit(f"{failed} failed")
 
 
+def cmd_run(a):
+    from dyntest.run import RunOptions, run
+
+    script = a.script.split(";") if a.script is not None else None
+    run(RunOptions(a.ext, a.mode, a.browser, a.baseline, a.passive, a.proxy_port, a.web_port,
+                   a.discard_profile, script, a.headless))
+
+
 def cmd_doctor(a):
     from dyntest.doctor import FAIL, run_checks
 
@@ -129,6 +138,20 @@ def main(argv=None):
     s.add_argument("--verify", action="store_true",
                    help="load it in headless Chrome for Testing (network blocked) and check the ID Chrome assigns")
     s.set_defaults(fn=cmd_prepare)
+
+    s = sub.add_parser("run", help="one guided capture: fresh Chrome + 1 extension through mitmproxy")
+    s.add_argument("ext", help="a .crx path, a file name in extensions/, an extension ID, or 'control'")
+    s.add_argument("--mode", required=True, choices=("session", "url", "cookies"), help="honeypot flow")
+    s.add_argument("--browser", choices=("cft", "chrome"),
+                   help="default: cft, or chrome if the extension uses chrome.identity.getAuthToken")
+    s.add_argument("--baseline", type=int, default=120, help="baseline seconds (default 120)")
+    s.add_argument("--passive", type=int, default=180, help="passive seconds (default 180)")
+    s.add_argument("--proxy-port", type=int, default=8080)
+    s.add_argument("--web-port", type=int, default=8081)
+    s.add_argument("--discard-profile", action="store_true", help="delete the Chrome profile after the run")
+    s.add_argument("--script", help=argparse.SUPPRESS)      # tests: ';'-separated answers instead of the keyboard
+    s.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("doctor", help="check mitmproxy, its CA, Chrome, ports and the honeypot")
     s.add_argument("--offline", action="store_true", help="skip the live honeypot check")
