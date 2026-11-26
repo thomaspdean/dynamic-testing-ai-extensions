@@ -10,6 +10,7 @@ import json
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-from dyntest import tokens  # noqa: E402
+from dyntest import mitm, tokens  # noqa: E402
 
 MITMDUMP = shutil.which("mitmdump")
 EXT = "chrome-extension://mfcncdeeeekkjgonodmcjajafigpgnhh"
@@ -65,7 +66,7 @@ class TestMitmdumpAddon(unittest.TestCase):
 
         cls.proxy_port = _free_port()
         cls.proc = subprocess.Popen(
-            [MITMDUMP, "--listen-host", "127.0.0.1", "-p", str(cls.proxy_port),
+            [MITMDUMP, "--listen-host", "127.0.0.1", "-p", str(cls.proxy_port), *mitm.PROXY_OPTIONS,
              "--set", f"confdir={cls.tmp / 'conf'}", "-w", str(cls.run_dir / "flows.mitm"),
              "-s", str(REPO / "dyntest" / "detect_tokens.py"),
              "--set", f"dyn_run_dir={cls.run_dir}", "--set", f"dyn_tokens={cls.tmp / 'tokens.json'}"],
@@ -90,6 +91,8 @@ class TestMitmdumpAddon(unittest.TestCase):
         cls.send("passive", "GET", "localhost", "/honey/cookies/read/", None,
                  {"Cookie": "pollen_test_name=Mira%20Holloway"})
         cls.send("active:summarize", "GET", "127.0.0.1", "/clean?q=hello", None, {})
+        cls.send_to_dead_server()
+
 
         cls.proc.send_signal(signal.SIGINT)            # graceful stop: flushes flows.mitm
         cls.output = cls.proc.communicate(timeout=30)[0].decode(errors="replace")
@@ -109,6 +112,25 @@ class TestMitmdumpAddon(unittest.TestCase):
         assert r.status == 200, (r.status, path)
 
     @classmethod
+    def send_to_dead_server(cls):
+        """HTTPS POST to a server that isn't there (like Zetoe's backend in the pilot). The body must
+        still be recorded: that only works because the proxy reads the request before connecting."""
+        (cls.run_dir / "phase").write_text("passive")
+        dead = _free_port()                                   # nothing listens here
+        ctx = ssl.create_default_context()
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE   # throwaway CA in a temp confdir
+        c = http.client.HTTPSConnection("127.0.0.1", cls.proxy_port, timeout=15, context=ctx)
+        c.set_tunnel("api.dead-backend.test", dead)
+        try:
+            c.request("POST", "/api/playwright", body=b'{"cookies":"pollen_test_ssn=900-12-3456"}',
+                      headers={"Origin": EXT, "Content-Type": "application/json"})
+            cls.dead_status = c.getresponse().status         # mitmproxy answers 502
+        except OSError as e:
+            cls.dead_status = repr(e)
+        finally:
+            c.close()
+
+    @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
@@ -118,9 +140,9 @@ class TestMitmdumpAddon(unittest.TestCase):
         return found[0]
 
     def test_every_request_recorded_with_its_phase(self):
-        self.assertEqual([(r["phase"], r["method"], r["n_hits"] > 0) for r in self.reqs],
+        self.assertEqual([(r["phase"], r["method"], r["n_hits"] > 0) for r in self.reqs if r["type"] == "http"],
                          [("setup", "POST", True), ("passive", "GET", True), ("passive", "POST", True),
-                          ("passive", "GET", True), ("active:summarize", "GET", False)])
+                          ("passive", "GET", True), ("active:summarize", "GET", False), ("passive", "POST", True)])
 
     def test_setup_password_tagged_setup(self):
         h = self.hit("login_password")
@@ -140,6 +162,13 @@ class TestMitmdumpAddon(unittest.TestCase):
     def test_cookie_to_honeypot_flagged(self):
         h = self.hit("name")
         self.assertEqual((h["location"], h["to_honeypot"], h["host"]), ("header:cookie", True, "localhost"))
+
+    def test_request_to_dead_server_is_still_searched(self):
+        h = [x for x in self.hits if x["host"] == "api.dead-backend.test"]
+        self.assertTrue(h, f"body never reached the detector (status {self.dead_status})")
+        self.assertEqual((h[0]["field"], h[0]["location"], h[0]["is_extension_origin"]), ("ssn", "body", True))
+        nr = [r for r in self.reqs if r["type"] == "no_response"]
+        self.assertEqual([(r["host"], r["phase"]) for r in nr], [("api.dead-backend.test", "passive")])
 
     def test_flows_saved(self):
         self.assertGreater((self.run_dir / "flows.mitm").stat().st_size, 0)

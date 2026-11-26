@@ -2,6 +2,7 @@
 
 Run folders are produced by the real Recorder (same JSONL the detector writes) plus a meta.json.
 """
+import base64
 import csv
 import json
 import shutil
@@ -64,10 +65,19 @@ class TestSummarize(unittest.TestCase):
             ("active:autofill", "collector.example.net", [], b"pw=Pollen%21Test2048"),               # leak, page origin
             ("active:autofill", "clients2.google.com", [], b""),                                      # Chrome noise
         ])
+        with open(runs / "r2_zetoe_session" / "requests.jsonl", "a") as f:     # api.zetoe.com never answered once
+            f.write(json.dumps({"run_id": "r2_zetoe_session", "ts": "", "phase": "passive", "type": "no_response",
+                                "method": "POST", "host": "api.zetoe.com", "url": "https://api.zetoe.com/x",
+                                "error": "Client disconnected."}) + "\n")
         (runs / "r2_zetoe_session" / "notes.md").write_text("# notes")
         make_run(runs, "r3_zetoe_url", False, "url", [("baseline", "api.zetoe.com", [], b"")], aborted=True)
         (runs / "not-a-run").mkdir()
+        make_run(runs, "r4_zetoe_cookies", False, "cookies", [
+            ("passive", "api.zetoe.com", [("Origin", EXT)], b'{"cookies":[{"value":"0048172396"}]}'),
+            ("active:improve", "ai.example.org", [("Origin", EXT)], base64.b64encode(b"key sk-proj-TEST" + b"0" * 42)),
+        ])
         cls.res = summarize([runs], cls.tmp / "results")
+        cls.ext = rows(cls.tmp / "results" / "extensions.csv")
         cls.runs = {r["run_id"]: r for r in rows(cls.tmp / "results" / "runs.csv")}
         cls.hits = rows(cls.tmp / "results" / "hits.csv")
         cls.hosts = rows(cls.tmp / "results" / "hosts.csv")
@@ -77,7 +87,7 @@ class TestSummarize(unittest.TestCase):
         shutil.rmtree(cls.tmp)
 
     def test_finds_runs_and_skips_other_folders(self):
-        self.assertEqual(set(self.runs), {"r1_control_session", "r2_zetoe_session", "r3_zetoe_url"})
+        self.assertEqual(set(self.runs), {"r1_control_session", "r2_zetoe_session", "r3_zetoe_url", "r4_zetoe_cookies"})
 
     def test_leak_rule(self):
         r = self.runs["r2_zetoe_session"]
@@ -100,6 +110,30 @@ class TestSummarize(unittest.TestCase):
         self.assertEqual(h[("r2_zetoe_session", "clients2.google.com")]["in_control"], "Y")
         self.assertEqual(h[("r2_zetoe_session", "api.zetoe.com")]["in_control"], "N")
         self.assertEqual(h[("r2_zetoe_session", HP)]["honeypot"], "Y")
+
+    def test_no_response_reported_not_counted_as_request(self):
+        r = self.runs["r2_zetoe_session"]
+        self.assertEqual((r["no_response"], r["requests"]), ("api.zetoe.com", "6"))
+        z = {x["host"]: x for x in self.hosts if x["run_id"] == "r2_zetoe_session"}["api.zetoe.com"]
+        self.assertEqual(z["no_response"], "1")
+
+    def test_extension_row_rolls_up_modes(self):
+        (z,) = self.ext                                                   # one extension, control excluded
+        self.assertEqual((z["extension"], z["id_confirmed"], z["aborted_runs_skipped"]), ("zetoe", "Y", "1"))
+        self.assertEqual(z["runs"], "r2_zetoe_session; r4_zetoe_cookies")  # aborted url run left out
+        self.assertEqual((z["modes_run"], z["modes_missing"], z["control_modes"]), ("session; cookies", "url", "session"))
+        self.assertEqual((z["session_leak"], z["url_leak"], z["cookies_leak"]), ("Y", "", "Y"))   # url not run: blank
+
+    def test_extension_row_kinds_and_delivery(self):
+        (z,) = self.ext
+        self.assertEqual((z["leak_password"], z["leak_api_keys"], z["leak_government_id"], z["leak_financial"],
+                          z["leak_identity"]), ("Y", "Y", "Y", "Y", "N"))
+        self.assertEqual(z["n_strong_fields_leaked"], "4/12")
+        self.assertEqual((z["passive_leak"], z["active_leak"]), ("Y", "Y"))
+        self.assertEqual(z["leak_hosts_no_response"], "api.zetoe.com")
+        self.assertEqual(z["delivered"], "partial")                         # zetoe never answered, the others did
+        self.assertEqual(z["obfuscated"], "Y")                              # the base64'd API key
+        self.assertEqual((z["store_label"], z["disclosed_by_label"]), ("", ""))   # manual columns left blank
 
     def test_hosts_table(self):
         z = {x["host"]: x for x in self.hosts if x["run_id"] == "r2_zetoe_session"}["api.zetoe.com"]
@@ -131,7 +165,7 @@ class TestSummarize(unittest.TestCase):
 
     def test_rerun_overwrites_and_dedupes_runs(self):
         res = summarize([self.tmp / "runs", self.tmp / "runs" / "r2_zetoe_session"], self.tmp / "results")
-        self.assertEqual(len(res["runs"]), 3)
+        self.assertEqual(len(res["runs"]), 4)
 
 
 if __name__ == "__main__":

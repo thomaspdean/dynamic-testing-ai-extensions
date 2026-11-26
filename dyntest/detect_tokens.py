@@ -81,6 +81,15 @@ class DetectTokens:
         host = getattr(conn, "sni", None) or str(getattr(getattr(data, "context", None), "server", ""))
         self.rec.on_tls_failed(host or "?", str(getattr(conn, "error", "") or "client TLS handshake failed"))
 
+    def error(self, flow):
+        if not self.rec or flow.response is not None or not flow.error:
+            return
+        r = flow.request
+        try:
+            self.rec.on_no_response(r.method, r.pretty_url, r.pretty_host, str(flow.error.msg))
+        except Exception:  # noqa: BLE001
+            log.exception("dyntest: failed to note error for %s", r.pretty_url)
+
     def done(self):
         if self.rec:
             self.rec.close()

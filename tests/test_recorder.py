@@ -66,6 +66,23 @@ class TestRecorder(unittest.TestCase):
         ws, tls = read_jsonl(self.dir / "requests.jsonl")
         self.assertEqual((tls["type"], tls["host"]), ("tls_failed", "pinned.example.com"))
 
+    def test_http2_cookie_crumbs_are_one_header(self):
+        crumbs = [("cookie", "pollen_test_name=Mira%20Holloway"), ("cookie", "pollen_test_cc_name=Mira%20Holloway"),
+                  ("cookie", "pollen_test_ssn=900-12-3456")]
+        self.rec.on_request("GET", "https://quillbert.github.io/honey/cookies/read/", "quillbert.github.io", crumbs)
+        hits = read_jsonl(self.dir / "hits.jsonl")
+        self.assertEqual(sorted((h["field"], h["count"]) for h in hits), [("name,cc_name", 2), ("ssn", 1)])
+
+    def test_no_response_noted_after_the_request(self):
+        self.phase("passive")
+        self.rec.on_request("POST", "https://api.zetoe.com/api/playwright", "api.zetoe.com", [("Origin", EXT)],
+                            b'{"cookies":"900-12-3456"}')
+        self.rec.on_no_response("POST", "https://api.zetoe.com/api/playwright", "API.zetoe.com", "Client disconnected.")
+        req, nr = read_jsonl(self.dir / "requests.jsonl")
+        self.assertEqual((req["type"], req["n_strong_hits"]), ("http", 1))
+        self.assertEqual((nr["type"], nr["host"], nr["phase"], nr["error"]),
+                         ("no_response", "api.zetoe.com", "passive", "Client disconnected."))
+
     def test_request_ids_continue_after_reopen(self):
         self.rec.on_request("GET", "https://a.com/", "a.com", [])
         self.rec.close()

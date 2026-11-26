@@ -4,7 +4,7 @@
 Drop a .crx into extensions/ (or pass any path), then:
   python3 dyn.py doctor               # check this machine; creates mitmproxy's CA on first use
   python3 dyn.py run zetoe --mode session   # one guided capture (also: run control --mode ...)
-  python3 dyn.py summarize            # all run folders -> results/runs.csv, hits.csv, hosts.csv
+  python3 dyn.py summarize            # all run folders -> results/extensions.csv, runs.csv, hits.csv, hosts.csv
   python3 dyn.py info zetoe            # what the harness reads from the file
   python3 dyn.py prepare zetoe --verify   # unpack with its real ID; prove it in Chrome (network blocked)
   python3 dyn.py tokens --check        # the honeytokens; confirm they're still on the live honeypot
@@ -98,7 +98,11 @@ def cmd_summarize(a):
         flags = "".join([" [aborted]" if r["aborted"] == "Y" else "",
                          " [ID not confirmed]" if r["id_confirmed"] == "N" else ""])
         print(f"{r['run_id']:<40} {leak}{flags}")
-    print(f"\n{len(rows)} runs, {res['hits']} hits, {res['hosts']} run/host rows -> {res['out']}/runs.csv, hits.csv, hosts.csv")
+    print(f"\n{len(res['extensions'])} extensions, {len(rows)} runs, {res['hits']} hits, {res['hosts']} run/host rows"
+          f" -> {res['out']}/extensions.csv, runs.csv, hits.csv, hosts.csv")
+    for e in res["extensions"]:
+        if e["modes_missing"]:
+            print(f"note: {e['extension']} still needs mode(s): {e['modes_missing']}")
     if not res["have_control"]:
         print("note: no control run found, so hosts can't be compared against Chrome's own traffic "
               "(dyn.py run control --mode <mode>)")
@@ -165,8 +169,9 @@ def main(argv=None):
     s.add_argument("--mode", required=True, choices=("session", "url", "cookies"), help="honeypot flow")
     s.add_argument("--browser", choices=("cft", "chrome"),
                    help="default: cft, or chrome if the extension uses chrome.identity.getAuthToken")
-    s.add_argument("--baseline", type=int, default=120, help="baseline seconds (default 120)")
-    s.add_argument("--passive", type=int, default=180, help="passive seconds (default 180)")
+    s.add_argument("--baseline", type=int, default=60, help="hands-off seconds on example.com (default 60)")
+    s.add_argument("--passive", type=int, default=60,
+                   help="hands-off seconds on the honeypot after your clicks (default 60)")
     s.add_argument("--proxy-port", type=int, default=8080)
     s.add_argument("--web-port", type=int, default=8081)
     s.add_argument("--discard-profile", action="store_true", help="delete the Chrome profile after the run")
@@ -174,7 +179,7 @@ def main(argv=None):
     s.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(fn=cmd_run)
 
-    s = sub.add_parser("summarize", help="run folders -> results/runs.csv, hits.csv, hosts.csv")
+    s = sub.add_parser("summarize", help="run folders -> results/extensions.csv, runs.csv, hits.csv, hosts.csv")
     s.add_argument("paths", nargs="*", help="runs/ (default) and/or other folders of runs, e.g. teammates' from Drive")
     s.add_argument("--out", help="output folder (default results/)")
     s.set_defaults(fn=cmd_summarize)

@@ -17,6 +17,12 @@ from pathlib import Path
 
 CA_CERT = "mitmproxy-ca-cert.pem"
 
+# Options every capturing proxy gets. connection_strategy=lazy: accept the browser's TLS and read its
+# whole request BEFORE connecting to the real server. mitmproxy's default (eager) connects upstream
+# first, so a send to a server that is down or hangs is never seen, even though the extension tried
+# it (found in the first Zetoe pilot: its /playwright upload died this way, unrecorded).
+PROXY_OPTIONS = ["--set", "connection_strategy=lazy"]
+
 
 def confdir() -> Path:
     """mitmproxy's config dir (where its CA lives). Override with $DYN_MITM_CONFDIR."""

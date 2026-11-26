@@ -303,7 +303,7 @@ the page and from the extension alike: the browser can't send anything that does
 
 | File | One line per | Holds |
 |---|---|---|
-| `requests.jsonl` | every request and WebSocket message, hit or not, plus every connection that couldn't be decrypted (`tls_failed`) | time, phase, method, host, URL, `Origin`, whether the origin is a `chrome-extension://` page, `Sec-Fetch-Site/Dest`, content type, size, whether it went to the honeypot, number of (strong) hits |
+| `requests.jsonl` | every request and WebSocket message, hit or not, plus every connection that couldn't be decrypted (`tls_failed`) and every request that got no response (`no_response`) | time, phase, method, host, URL, `Origin`, whether the origin is a `chrome-extension://` page, `Sec-Fetch-Site/Dest`, content type, size, whether it went to the honeypot, number of (strong) hits |
 | `hits.jsonl` | each (request, token, encoding, location) match | the above plus `field` (e.g. `name,cc_name`), `value_kind`, `strength`, `matched` (value or digits-only alt), `encoding`, `location`, `count`, and `context`: 40 bytes either side, as evidence |
 
 `requests.jsonl` matters even when nothing leaks. It's the full list of hosts the extension
@@ -521,6 +521,24 @@ python3 dyn.py run control --mode session      # no extension: Chrome's own traf
 ```
 `run` ties steps 1–5 together. The tester only follows prompts.
 
+### Run all three modes for every extension
+The honeypot puts the same fake values in three different places, and each mode tests one of them:
+
+| Mode | Where the values live | Catches extensions that… |
+|---|---|---|
+| `session` | the page's `sessionStorage`, the password field, and visible text on the results page | dump page storage, or scrape page text and form fields |
+| `url` | the page URL (GET forms; the password rides along in a hidden input) | send or log the URLs you visit |
+| `cookies` | `pollen_test_*` cookies | read cookies (`chrome.cookies` or `document.cookie`) |
+
+**Run all three for every extension**, one run per mode, each with a fresh profile. The values
+are identical across modes, so the mode is what tells you *where* a leaked value came from.
+Don't skip `cookies` for extensions without the `cookies` permission: a content script can still
+read `document.cookie`, and "nothing sent" is a result too. Do one control run per mode as well.
+
+Zetoe shows why: in `cookies` mode it sent every honeypot cookie to `api.zetoe.com/api/playwright`.
+The same request carries `localStorageDump`, `sessionStorageDump` and `pageUrl`, which only the
+`session` and `url` runs can show filled in.
+
 | Stage | What happens | Built on |
 |---|---|---|
 | 1. Prepare | read the `.crx`; unpack with its real ID (cached); pick the browser (branded Chrome if the manifest has `oauth2`); make sure the CA exists and compute its SPKI hash; check ports 8080/8081 are free | steps 1, 2, 5 |
@@ -535,8 +553,8 @@ python3 dyn.py run control --mode session      # no extension: Chrome's own traf
 |---|---|---|
 | `setup` (extensions only) | sign in with a throwaway account, finish onboarding, close welcome tabs, don't open the honeypot. For branded Chrome: the exact "Load unpacked" steps and folder path | Enter; then the extension ID is confirmed from the profile's `Secure Preferences` (up to 20 s) |
 | `startup` (control only) | none: just Chrome launching | automatically |
-| `baseline` | opens example.com; "don't touch anything" | timer (default 2 min) or Enter |
-| `passive` | opens the mode's start page and prints its steps from `tokens.json` → `honeypot.flows`; "don't click the extension" | timer (default 3 min) or Enter |
+| `baseline` | opens example.com; "don't touch anything" | timer (default 1 min) or Enter |
+| `passive` | opens the mode's start page and prints its steps from `tokens.json` → `honeypot.flows`; "don't click the extension". Tester presses Enter after the clicks, then a hands-off timer runs | Enter after the clicks, then the timer (default 1 min) or Enter |
 | `active:<feature>` (extensions only) | type a feature name; use it; Enter. Repeat; `done` ends | `done` |
 | `notes` | writes a `notes.md` template and asks you to fill it in | Enter |
 | `finished` | written at shutdown, also after Ctrl-C | n/a |
@@ -622,7 +640,7 @@ python3 dyn.py summarize --out somewhere/          # default results/
 - **Input:** run folders, i.e. anything with a `meta.json`; other folders are skipped. Each run is
   counted once even if two paths reach it. Teammates' runs downloaded from Drive can be summarised
   together with yours.
-- **Output:** three CSVs, rewritten from scratch every time, plus one line per run in the terminal.
+- **Output:** four CSVs, rewritten from scratch every time, plus one line per run in the terminal.
   With no runs found it writes nothing.
 
 ### The leak rule (one definition, used everywhere)
@@ -644,7 +662,7 @@ Every host contacted in **any** control run goes into a "Chrome's own traffic" s
 If there's no control run, these columns are left **blank**, not "N", and the command says so.
 "Not in control" would be meaningless without a control.
 
-### The three tables
+### The tables
 **`runs.csv`**: one row per run (extension × mode). These are the result rows:
 
 | Column group | Columns |
@@ -690,3 +708,104 @@ comparison you do afterwards; join on `ext_id` + `crx_sha256`.
 - Fixed while testing: `summarize` with no runs used to create an empty `results/`. It now writes
   nothing.
 - Full suite: **67 tests**, all passing (~38 s).
+
+---
+
+## Changes after the first real runs (control + Zetoe pilot)
+
+The first manual runs (2026-11-20 and 2026-11-25) found six things the automated tests couldn't:
+
+1. **Keychain prompt and "Sign in to Chromium" screen.** `run` opens example.com and the
+   honeypot by launching Chrome a second time with the same profile. That second launch had only
+   `--user-data-dir` + URL, without `--use-mock-keychain` and `--no-first-run`. It now gets the
+   same flags as the first launch, minus `--load-extension`, which the running browser would treat
+   as a reload. Test: `TestOpenUrl`. Confirmed on the next real run: no popups.
+2. **Why an extension did or didn't act was invisible.** In the Zetoe pilot, its form-analysis
+   upload (storage dumps and cookies to `api.zetoe.com/api/playwright`) left no request in the
+   capture, and the capture couldn't say why (the cause turned out to be item 5). Chrome now runs with `--enable-logging=stderr --v=0`, so
+   `chrome.log` records every console message, labelled with its source: page, content script
+   (`chrome-extension://<id>/contentScript.js`) and service worker. Checked: all three reach the
+   log. `test_run` asserts the test extension's service-worker message appears.
+3. **Chrome itself can send typed URLs to Google.** The pilot captured
+   `www.google.com/complete/search?client=chrome-omni`, the address bar's suggestion lookup, when
+   the tester typed the honeypot URL. In url mode a typed or pasted URL holds the values, so Chrome
+   would produce a "leak" that isn't the extension's. A new profile is now seeded
+   (`browser.seed_profile`) with:
+   - `search.suggest_enabled = false`: no omnibox suggestions;
+   - `alternate_error_pages.enabled = false`: no "did you mean" lookups for failed URLs.
+
+   Checked in both browsers that Chrome keeps them:
+   - Chrome for Testing 131 migrates the second to `alternate_error_pages.backup = false`
+     (default `true`);
+   - branded Chrome 157 keeps `enabled: false`.
+
+   Tests: `TestSeedProfile`, plus `test_run` reading the profile's `Preferences` after a real run.
+
+Known remaining Chrome noise (not the extension; judge by `Origin`):
+- `chromewebstore.googleapis.com/…/storeMetadata:batchGet`: Chrome looks up installed extensions
+  in the store. It only happens when an extension is installed, so the control run never contains
+  it and `summarize` marks it `in_control = N`. It's sent without an extension `Origin`.
+
+4. **Shorter runs.** Testers finish the honeypot clicks in under a minute, so a flat 3-minute
+   passive timer (and a 2-minute baseline) was mostly waiting. Now:
+   - baseline is **1 min** (`--baseline`);
+   - passive is **untimed clicks** (Enter when done) **+ 1 min hands-off** (`--passive`).
+
+   The hands-off part is kept on purpose. Extensions often send late (analytics batches flushed
+   every 30–60 s, session-replay uploads on a timer, idle callbacks), and those sends should land
+   in `passive`, not leak into `active`. A run now takes about 4–6 minutes instead of 9–10. Use
+   longer values for an extension that seems to send on a slower timer.
+
+5. **Sends to a dead server were invisible (the big one).** `chrome.log` from the Zetoe cookies
+   run showed `[Background] Form detection error: TypeError: Failed to fetch` twice during
+   passive. `mitm.log` had two proxy connections that opened at the same moments, stayed silent
+   for exactly 30 s, and ended with "error establishing server connection: client disconnected".
+   The timestamps matched to the millisecond. Zetoe *did* try to upload the cookies and storage
+   dumps, but `api.zetoe.com` never answered.
+
+   mitmproxy's default `connection_strategy=eager` connects to the real server **before** it
+   accepts the browser's TLS handshake. With the server hanging, the browser never got far enough
+   to send its request, so the detector never saw the body. The session-mode pilot had the same
+   pattern (three 30-second dead connections), misread at first as Chrome's idle pre-connections.
+
+   Fix:
+   - **`connection_strategy=lazy`** (`mitm.PROXY_OPTIONS`, used by `run`): mitmproxy completes
+     the browser's handshake with a certificate for the requested name, reads the **whole
+     request**, records and searches it, and only then connects upstream. If the server is dead,
+     the extension still gets an error, just as it would without the proxy, so its behaviour is
+     unchanged. But what it *tried* to send is now in `requests.jsonl` / `hits.jsonl`.
+   - **`no_response` lines:** when a request gets no response (server down, hung, or the browser
+     gave up), the detector adds `{"type": "no_response", host, url, phase, error}` to
+     `requests.jsonl`. `run`'s end summary and `summarize` (`runs.csv` / `hosts.csv` column
+     `no_response`) list those hosts. A hit to a `no_response` host means "attempted, not
+     delivered". That's still the extension's behaviour, but say so in the write-up.
+   - Test: `test_request_to_dead_server_is_still_searched` sends an HTTPS POST through a real
+     mitmdump to a port where nothing listens. With `eager` it fails (the proxy answers `502` to
+     the tunnel, and the body is never seen). With `lazy` the SSN hit is recorded, followed by a
+     `no_response` line.
+
+   Also: with HTTP/2, Chrome sends cookies as separate `cookie` header lines, which produced
+   duplicate hits. The recorder now joins them into one header first.
+
+6. **One row per extension (`extensions.csv`).** The final report needs one row per extension,
+   not one per run. `summarize` now also writes `results/extensions.csv`, which rolls each
+   extension's runs (grouped by `ext_id` + `crx_sha256`) into that row. Aborted runs are left out
+   unless they're all there is (`aborted_runs_skipped` counts them).
+
+   | Column group | Columns |
+   |---|---|
+   | What was tested | `extension`, `name`, `ext_id`, `version`, `crx_sha256`, `browser`, `id_confirmed` (Y only if every run confirmed it) |
+   | Coverage | `modes_run`, `modes_missing` (the terminal also warns), `control_modes`, `runs`, `aborted_runs_skipped` |
+   | Where the data was taken from | `session_leak`, `url_leak`, `cookies_leak`: Y/N, or blank if that mode wasn't run |
+   | What was sent | `leak_identity`, `leak_contact`, `leak_address`, `leak_government_id`, `leak_financial`, `leak_password`, `leak_api_keys`, `leak_crypto`; `leak_fields`; `n_strong_fields_leaked` (e.g. `12/12`); `weak_cohits` |
+   | When | `passive_leak`, `active_leak`, `leak_phases` |
+   | Where it went | `leak_hosts`, `leak_hosts_not_in_control`, `leak_from_extension_origin`, `leak_hosts_no_response`, `delivered` (Y / N / partial: did the receiving servers answer?) |
+   | How | `leak_locations`, `leak_encodings`, `obfuscated` (base64, hex or compressed) |
+   | Context | `hosts_not_in_control` (every new host, leak or not), `tls_failed`, `notes` |
+   | Blank, for you | `account_used`, `features_tried`, `passive_trigger`, `active_sends_more_than_needed`, `host_category`, `predicted_by_static`, `store_label`, `disclosed_by_label`, `analyst_notes` |
+
+   The blank columns are the comparison the harness deliberately doesn't do. Fill them in the
+   shared sheet after importing the CSV. Tests: `test_extension_row_rolls_up_modes` and
+   `test_extension_row_kinds_and_delivery`.
+
+Full suite after these changes: **75 tests**, all passing.

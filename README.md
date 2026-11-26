@@ -68,7 +68,9 @@ sequenceDiagram
    authority's fingerprint (`--ignore-certificate-errors-spki-list`), so **only this throwaway
    profile** trusts it. Your Mac's keychain and your normal browser are never touched. If a
    connection still can't be decrypted (e.g. an app that pins its certificate), it's logged as
-   `tls_failed`, so you know something went by unread.
+   `tls_failed`, so you know something went by unread. mitmproxy reads the browser's **whole
+   request before** it connects to the real server, so a send to a server that is down or hangs
+   is still captured; it's marked `no_response` (attempted, not delivered).
 2. **Decoding.** mitmproxy undoes the body's transport compression (`Content-Encoding: gzip`, `br`,
    `deflate`, `zstd`). The detector then has the URL, each header (including `Cookie` and
    `Referer`), the body, and any WebSocket message the browser sends.
@@ -117,15 +119,15 @@ not "doesn't happen".
 ## The browsing flow
 
 `python3 dyn.py run <name> --mode <mode>` opens Chrome and prints each step in the terminal.
-Timed phases count down by themselves; the others wait for Enter. About 10–15 minutes per run.
+Timed phases count down by themselves; the others wait for Enter. About 4–6 minutes per run.
 
 | Phase | Time | What you do |
 |---|---|---|
 | **setup** | as needed | Sign in to the extension with a **throwaway** account and finish its onboarding. Don't open the honeypot yet. Nothing found here counts. |
-| **baseline** | 2 min | Sit on example.com. Touch nothing. |
-| **passive** | ~3 min | Walk the honeypot flow for the mode (below) **without touching the extension**: no icon, sidebar or popups. Anything sent now went out without you asking. |
+| **baseline** | 1 min | Sit on example.com. Touch nothing. |
+| **passive** | your clicks + 1 min | Walk the honeypot flow for the mode (below) **without touching the extension** (no icon, sidebar or popups), press Enter, then hands off for 1 min so late sends (batched analytics, replay uploads) are caught. Anything sent now went out without you asking. |
 | **active** | ~1 min per feature | Type a feature name (`summarize`, `chat`, `select-text`, `autofill`, `translate`…), use that feature on the honeypot page, press Enter. Repeat per feature, then type `done`. |
-| **notes** | 1–2 min | Fill in `notes.md`: account used, what didn't work, anything odd. |
+| **notes** | ~1 min | Fill in `notes.md`: account used, what didn't work, anything odd. |
 
 Honeypot steps for the passive phase (`run` opens the start page and prints these; the fields are
 prefilled, so don't edit them):
@@ -140,7 +142,7 @@ While it runs, the terminal prints a line for each fake value seen going to a no
 e.g. `⚑ ssn → api.example.com (body, raw, passive)`. It also shows a link to mitmweb's live view
 of all traffic. Ctrl-C at any point still closes Chrome and saves the capture.
 
-Run each mode as its own run; each gets a fresh browser profile. Also do one **control run** per
+Run **all three modes for every extension** (session, url, cookies), each as its own run with a fresh browser profile. Also do one **control run** per
 mode, `dyn.py run control --mode <mode>`: the same steps with no extension, so Chrome's own
 traffic isn't blamed on an extension.
 
@@ -155,11 +157,12 @@ python3 dyn.py summarize runs/ ~/Downloads/team-runs/   # also teammates' run fo
 ```
 
 It prints one line per run (`LEAK ssn; login_password → api.example.com (passive)` or
-`no leak observed`) and writes three CSVs to `results/`:
+`no leak observed`) and writes four CSVs to `results/`:
 
 | File | One row per | Use it for |
 |---|---|---|
-| `runs.csv` | run (extension × mode) | The results table: version and SHA-256 tested, ID confirmed, phases, **leak Y/N**, fields and kinds leaked, destination hosts (also excluding hosts Chrome itself uses), passive vs. active, encodings, where in the request, whether the extension's own origin sent it, weak co-hits |
+| `extensions.csv` | extension | **The final results table.** All of an extension's runs rolled into one row: modes run/missing, leak Y/N per mode (session / url / cookies), per data kind (identity, contact, address, SSN, financial, password, API keys, crypto), passive vs. active, destination hosts, whether those servers answered (`delivered`), encodings, obfuscated Y/N. Ends with blank columns for your own analysis: `host_category`, `predicted_by_static`, `store_label`, `disclosed_by_label`… |
+| `runs.csv` | run (extension × mode) | Per-run detail: version and SHA-256 tested, ID confirmed, phases, **leak Y/N**, fields and kinds leaked, destination hosts (also excluding hosts Chrome itself uses), passive vs. active, encodings, where in the request, whether the extension's own origin sent it, weak co-hits |
 | `hits.csv` | value found in a request | Evidence: exact request, phase, location, encoding, 40 bytes of context, and whether it counts as a leak |
 | `hosts.csv` | host contacted in a run | Every server the extension talked to (leak or not), in which phases, how many requests came from the extension's origin, and whether a control run also contacted it |
 
@@ -178,7 +181,7 @@ you: join on `ext_id` + `crx_sha256`.
 | `dyntest/` | The code behind `dyn.py`, including the mitmproxy addon that scans traffic |
 | `tests/` | `python3 -m unittest discover tests` |
 | `build/` | Generated: unpacked extensions. Safe to delete |
-| `runs/<date>_<name>_<mode>/` | One folder per run: `hits.jsonl` (fake values found), `requests.jsonl` (every request), `phases.jsonl`, `meta.json`, `notes.md`, `flows.mitm` / `flows.har` (full capture) |
+| `runs/<date>_<name>_<mode>/` | One folder per run: `hits.jsonl` (fake values found), `requests.jsonl` (every request), `phases.jsonl`, `meta.json`, `notes.md`, `flows.mitm` / `flows.har` (full capture), `chrome.log` (every console message from pages, content scripts and the extension, e.g. why a feature didn't run) |
 | `results/` | Tables from `summarize`: one row per run, every hit, every host contacted |
 | `docs/WALKTHROUGH.md` | How each piece works and how it was tested |
 | `CONTEXT.md` | Project background |

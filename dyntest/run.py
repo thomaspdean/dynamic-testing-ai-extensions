@@ -9,7 +9,9 @@ Everything lands in runs/<YYYY-MM-DD_HHMM>_<name>_<mode>/:
   phases.jsonl    every phase start, timestamped
   requests.jsonl  every request (detector)       hits.jsonl   every honeytoken found (detector)
   flows.mitm      full capture                   flows.har    the same as HAR
-  mitm.log / chrome.log                          notes.md     the tester's notes
+  mitm.log                                       notes.md     the tester's notes
+  chrome.log      Chrome's log incl. every console message from pages, content scripts and the
+                  extension's service worker (why an extension did or didn't do something)
   profile/        the throwaway Chrome profile (deleted with --discard-profile)
 """
 import json
@@ -47,8 +49,8 @@ class RunOptions:
     selector: str                      # extension (file name, path or ID) or "control"
     mode: str
     browser: str | None = None         # "cft" | "chrome" | None (auto from the manifest)
-    baseline: int = 120                # seconds
-    passive: int = 180
+    baseline: int = 60                 # seconds of hands-off on example.com
+    passive: int = 60                  # seconds of hands-off on the honeypot, after the tester's clicks
     proxy_port: int = 8080
     web_port: int = 8081
     discard_profile: bool = False
@@ -226,6 +228,7 @@ class Run:
         self.procs["mitmweb"] = subprocess.Popen(
             [str(self.mitmweb), "--listen-host", "127.0.0.1", "-p", str(o.proxy_port),
              "--web-host", "127.0.0.1", "--web-port", str(o.web_port), "--set", "web_open_browser=false",
+             *mitm.PROXY_OPTIONS,
              "--set", f"web_password={token}", "--set", f"confdir={mitm.confdir()}",
              "--set", f"save_stream_file={self.dir / 'flows.mitm'}", "--set", f"hardump={self.dir / 'flows.har'}",
              "-s", str(REPO / "dyntest" / "detect_tokens.py"),
@@ -237,9 +240,11 @@ class Run:
 
     def _start_chrome(self):
         ext_dir = Path(self.prepared["path"]) if (self.ext and self.kind == "cft") else None
+        browser.seed_profile(self.profile)
         args = [str(self.chrome), *(["--headless=new"] if self.o.headless else []),
                 *browser.chrome_flags(self.profile, f"127.0.0.1:{self.o.proxy_port}", self.spki, ext_dir),
-                "about:blank"]
+                "--enable-logging=stderr", "--v=0",   # console messages (pages, content scripts, service
+                "about:blank"]                        # workers) -> chrome.log, e.g. "[Zetoe] Autofill disabled"
         log = open(self.dir / "chrome.log", "wb")
         self.logs.append(log)
         self.procs["chrome"] = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -248,7 +253,10 @@ class Run:
         """Open a tab in the running test Chrome (a second launch with the same profile hands the URL over)."""
         if self.o.headless:
             return
-        subprocess.Popen([str(self.chrome), f"--user-data-dir={self.profile}", url],
+        # Same flags as the first launch (mock keychain, no first-run/sign-in screens, proxy, trust),
+        # minus --load-extension, which the running browser would treat as a reload request.
+        subprocess.Popen([str(self.chrome), *browser.chrome_flags(self.profile, f"127.0.0.1:{self.o.proxy_port}",
+                                                                  self.spki), url],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _confirm_id(self, wait: float) -> bool | None:
@@ -293,12 +301,16 @@ class Run:
 
         self.set_phase("passive")
         start = base + self.flow["start"]
-        c.say(f"\n── PASSIVE ({o.passive // 60}:{o.passive % 60:02d}) ─────────────────────────────")
+        c.say("\n── PASSIVE ───────────────────────────────────────────")
         c.say(f"  Opening {start}")
         for i, step in enumerate(self.flow["steps"], 1):
             c.say(f"   {i}. {step}")
         c.say("  Do NOT click the extension's icon, sidebar or popups. If it pops up by itself, leave it and note it.")
         self.open_url(start)
+        c.ask("  Press Enter once you've done the steps above.")
+        watch.poll()
+        # Extensions often send late (batched analytics, replay uploads, idle callbacks): wait hands-off.
+        c.say(f"  Now hands off for {o.passive // 60}:{o.passive % 60:02d}: leave the page open, touch nothing.")
         c.countdown(o.passive, watch.poll)
 
         if not self.control:
@@ -352,9 +364,10 @@ class Run:
         reqs, hits = jl("requests.jsonl"), jl("hits.jsonl")
         leaks = [h for h in hits if h["strength"] == "strong" and not h["to_honeypot"] and h["phase"] != "setup"]
         return {
-            "requests": sum(r["type"] != "tls_failed" for r in reqs),
+            "requests": sum(r["type"] in ("http", "ws") for r in reqs),
             "tls_failed": [f"{r['host']} ({r['error']})" for r in reqs if r["type"] == "tls_failed"],
-            "hosts": len({r["host"] for r in reqs}),
+            "no_response": sorted({r["host"] for r in reqs if r["type"] == "no_response"}),
+            "hosts": len({r["host"] for r in reqs if r["type"] in ("http", "ws")}),
             "hits": len(hits),
             "leak_hits": len(leaks),
             "fields_leaked": sorted({h["field"] for h in leaks}),
@@ -401,6 +414,9 @@ class Run:
         if s["tls_failed"]:
             c.say(f"  note: {len(s['tls_failed'])} TLS handshake(s) didn't complete, so those weren't inspected: "
                   f"{'; '.join(s['tls_failed'][:5])}")
+        if s["no_response"]:
+            c.say(f"  note: these servers never answered (requests were still recorded and searched): "
+                  f"{', '.join(s['no_response'])}")
         if self.ext and self.meta["id_confirmed"] is False:
             c.say("  ! the extension was NOT confirmed under its real ID in this profile")
         c.say(f"  saved in {self.dir}")

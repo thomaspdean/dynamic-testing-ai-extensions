@@ -86,6 +86,24 @@ def chrome_flags(profile: Path, proxy: str | None = None, spki: str | None = Non
     return flags
 
 
+# Written into a new profile before Chrome first starts. These stop Chrome itself from sending what
+# you type in the address bar to Google, which would show up as a "leak" (e.g. a url-mode honeypot
+# URL full of values typed or pasted into the omnibox) that isn't the extension's.
+PROFILE_PREFS = {
+    "search": {"suggest_enabled": False},              # no omnibox search suggestions
+    "alternate_error_pages": {"enabled": False},       # no "did you mean" lookups for failed URLs
+}
+
+
+def seed_profile(profile: Path) -> None:
+    """Create <profile>/Default/Preferences with PROFILE_PREFS (only for a brand-new profile)."""
+    prefs = profile / "Default" / "Preferences"
+    if prefs.exists():
+        return
+    prefs.parent.mkdir(parents=True, exist_ok=True)
+    prefs.write_text(json.dumps(PROFILE_PREFS))
+
+
 def check_trust(chrome: Path, proxy_port: int, spki: str | None, events: Path,
                 host: str = "dyn-doctor.test", timeout: float = 20) -> tuple[bool, str]:
     """Open https://<host>/ in headless Chrome through the proxy; True once mitmproxy saw the request.

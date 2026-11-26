@@ -51,6 +51,10 @@ class Recorder:
     # -- inputs ----------------------------------------------------------------------------------
     def on_request(self, method: str, url: str, host: str, headers: list[tuple[str, str]],
                    body: bytes = b"", ts: str | None = None) -> list[dict]:
+        # HTTP/2 sends cookies as several `cookie` header lines; join them so each cookie is one hit
+        crumbs = [v for k, v in headers if k.lower() == "cookie"]
+        if len(crumbs) > 1:
+            headers = [(k, v) for k, v in headers if k.lower() != "cookie"] + [("cookie", "; ".join(crumbs))]
         hdr = {k.lower(): v for k, v in headers}
         parts = [("url", url.encode("utf-8", "replace"))]
         parts += [(f"header:{k.lower()}", v.encode("utf-8", "replace")) for k, v in headers]
@@ -69,6 +73,13 @@ class Recorder:
         self._n += 1
         self._write(self._req, {"run_id": self.run_id, "id": self._n, "ts": ts or _now(), "phase": self.phase(),
                                 "type": "tls_failed", "host": host, "error": error[:300]})
+
+    def on_no_response(self, method: str, url: str, host: str, error: str, ts: str | None = None) -> None:
+        """A request that got no response (server down, hung, or the browser gave up). The request
+        itself was already recorded and searched; this line notes that it was never delivered."""
+        self._write(self._req, {"run_id": self.run_id, "ts": ts or _now(), "phase": self.phase(),
+                                "type": "no_response", "method": method, "host": host.lower(),
+                                "url": url[:URL_KEEP], "error": error[:300]})
 
     # -- core ------------------------------------------------------------------------------------
     def _record(self, kind, method, url, host, hdr, parts, size, ts) -> list[dict]:
