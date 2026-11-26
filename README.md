@@ -183,7 +183,8 @@ you: join on `ext_id` + `crx_sha256`.
 | `build/` | Generated: unpacked extensions. Safe to delete |
 | `runs/<date>_<name>_<mode>/` | One folder per run: `hits.jsonl` (fake values found), `requests.jsonl` (every request), `phases.jsonl`, `meta.json`, `notes.md`, `flows.mitm` / `flows.har` (full capture), `chrome.log` (every console message from pages, content scripts and the extension, e.g. why a feature didn't run) |
 | `results/` | Tables from `summarize`: one row per run, every hit, every host contacted |
-| `docs/WALKTHROUGH.md` | How each piece works and how it was tested |
+| `docs/WALKTHROUGH.md` | Step-by-step: from dropping in a `.crx` to the final results table |
+| `docs/DESIGN.md` | How each piece works inside and how it was tested |
 | `CONTEXT.md` | Project background |
 
 `runs/` and `results/` are never committed: captures contain test-account cookies and tokens.

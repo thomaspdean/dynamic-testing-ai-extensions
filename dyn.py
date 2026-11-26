@@ -9,7 +9,7 @@ Drop a .crx into extensions/ (or pass any path), then:
   python3 dyn.py prepare zetoe --verify   # unpack with its real ID; prove it in Chrome (network blocked)
   python3 dyn.py tokens --check        # the honeytokens; confirm they're still on the live honeypot
 
-See README.md for the browsing flow and docs/WALKTHROUGH.md for how each piece works.
+See docs/WALKTHROUGH.md for step-by-step use and docs/DESIGN.md for how each piece works.
 """
 import argparse
 import sys

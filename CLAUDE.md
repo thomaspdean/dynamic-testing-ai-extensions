@@ -11,4 +11,5 @@
 - Never commit captures (`runs/`, `results/`, `*.mitm`, `*.har`): they hold test-account tokens.
 - Don't use the hard-coded developer keys from the static notes, and don't send traffic to extension
   backends beyond normal use (no fuzzing, no replaying captured tokens).
-- Build step by step; `docs/WALKTHROUGH.md` explains each piece. Update it when a piece changes.
+- `docs/WALKTHROUGH.md` is the step-by-step usage guide (commands and what they do); keep it in
+  sync with the CLI. `docs/DESIGN.md` explains how each piece works; update it when a piece changes.
